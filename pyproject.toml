@@ -1,0 +1,41 @@
+[tool.poetry]
+name = "euroncap-rating-2026"
+version = "5.4.7"
+description = "This project implements Euro NCAP Rating Calculator 2026 to compute test scores"
+authors = ["IVEX NV <info@ivex.ai>"]
+license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/Euro-NCAP/euroncap_rating_2026"
+homepage = "https://github.com/Euro-NCAP/euroncap_rating_2026"
+packages = [
+    { include = "euroncap_rating_2026" },
+    { include = "data/ca_template.xlsx" },
+    { include = "data/cp_template.xlsx" },
+    { include = "data/sd_template.xlsx" },
+    { include = "data/pc_template.xlsx" },
+    { include = "data/overall_template.xlsx" }
+]
+
+
+[tool.poetry.dependencies]
+python = "^3.10"
+pandas = "^2.2.3"
+pydantic = "^2.11.1"
+pydantic-settings = "^2.8.1"
+openpyxl = "^3.1.5"
+click = "^8.1.7"
+
+[tool.poetry.group.dev.dependencies]
+matplotlib = "^3.9"
+pyarrow = "^25.0.1"
+pdoc = "^15.0.1"
+
+[tool.black]
+target-version = ["py310", "py311", "py312", "py313"]
+
+[tool.poetry.scripts]
+euroncap_rating_2026 = 'euroncap_rating_2026.cli:cli'
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
