@@ -706,6 +706,7 @@ def calculate_score(dfs: dict) -> dict:
 def compute_score(input_file, output_path):
     """Compute NCAP scores from an input Excel file."""
     common.check_version(input_file, common.CliCommand.PREPROCESS)
+    common.check_protocol(input_file)
     print(f"[Crash Protection] Computing NCAP scores from input Excel file...")
 
     if not input_file:

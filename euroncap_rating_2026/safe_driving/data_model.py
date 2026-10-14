@@ -14,14 +14,18 @@ from euroncap_rating_2026.common import NOT_APPLICABLE, is_not_applicable
 # survive the pd.read_excel default na_values (which silently collapse "N/A"
 # into NaN): the Input parameters dropdowns, plus the Scenario labels that
 # preprocess stamps the selected "N/A" into (Scenario Scores rows and the
-# verif rows whose Value cell is rendered white / not required). Scoped to
-# named columns so a stray "N/A" typed anywhere else (e.g. a PASS/FAIL Value
-# cell) keeps the historical blank/unassessed behavior.
+# verif rows whose Value cell is rendered white / not required), plus the
+# Driver monitoring General requirements Values that accept N/A
+# (driver_monitoring.compute_score keeps a stray "N/A" in a DM test-point
+# Value blank). Scoped to named columns so a stray "N/A" typed anywhere else
+# (e.g. a PASS/FAIL Value cell) keeps the historical blank/unassessed
+# behavior.
 PRESERVE_NA_SHEETS = {
     "Input parameters": ("Value",),
     "Scenario Scores": ("Scenario",),
     "OM - Occ. classification verif.": ("Scenario",),
     "VA - ACC verif.": ("Scenario",),
+    "DE - DM verif.": ("Value",),
 }
 
 

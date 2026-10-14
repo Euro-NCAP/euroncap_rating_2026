@@ -613,7 +613,7 @@ class TestPristineTemplateRegression(unittest.TestCase):
         "CP - Frontal FW": 47,
         "CP - Side MDB": 16,
         "CP - Side Pole": 8,
-        "Input parameters": 6,
+        "Input parameters": 7,
     }
 
     def setUp(self):

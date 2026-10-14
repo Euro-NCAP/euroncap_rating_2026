@@ -87,20 +87,52 @@ class TestCrashAvoidanceConsistency(unittest.TestCase):
         self.assertEqual(consistency.find_prediction_inconsistencies(self.wb), [])
 
     def test_dooring_violation_reported_per_cell(self):
+        # Equal-or-worse: a Warning system tops out at Yellow, so only a Green
+        # cell is better than the claim. Yellow, Orange and Brown are all
+        # reachable by a Warning system and are reported as consistent.
         self._set_vehicle_response("Warning")
         green = self._set_matrix_cell("LSC - Ped & Cyc pred.", "CBDA", 0, 0, "Green")
-        brown = self._set_matrix_cell("LSC - Ped & Cyc pred.", "CBDA", 1, 2, "Brown")
+        worse = self._set_matrix_cell("LSC - Ped & Cyc pred.", "CBDA", 1, 2, "Brown")
         allowed = self._set_matrix_cell("LSC - Ped & Cyc pred.", "CBDA", 2, 1, "Orange")
 
         findings = consistency.find_prediction_inconsistencies(self.wb)
 
         self.assertEqual({f.check for f in findings}, {common.CHECK_LSC_DOORING})
-        self.assertEqual({f.cell for f in findings}, {green, brown})
+        self.assertEqual({f.cell for f in findings}, {green})
+        self.assertNotIn(worse, {f.cell for f in findings})
         self.assertNotIn(allowed, {f.cell for f in findings})
         for f in findings:
             self.assertEqual(f.sheet, "LSC - Ped & Cyc pred.")
             self.assertIn("Vehicle response is 'Warning'", f.description)
+            # Red never reaches the check, so it is not advertised as allowed.
+            self.assertIn("(allowed: Yellow, Orange, Brown)", f.description)
             self.assertEqual(f.row_identity.get("Scenario"), "CBDA")
+
+    def test_dooring_retention_claim_allows_every_colour(self):
+        # Retention reaches Green, so no prediction can be better than the claim.
+        self._set_vehicle_response("Retention")
+        for row, col, color in (
+            (0, 0, "Green"),
+            (1, 2, "Yellow"),
+            (2, 1, "Orange"),
+            (0, 1, "Brown"),
+        ):
+            self._set_matrix_cell("LSC - Ped & Cyc pred.", "CBDA", row, col, color)
+
+        findings = consistency.find_prediction_inconsistencies(self.wb)
+        self.assertEqual(
+            [f for f in findings if f.check == common.CHECK_LSC_DOORING], []
+        )
+
+    def test_dooring_information_claim_rejects_anything_above_brown(self):
+        self._set_vehicle_response("Information")
+        yellow = self._set_matrix_cell("LSC - Ped & Cyc pred.", "CBDA", 0, 0, "Yellow")
+        brown = self._set_matrix_cell("LSC - Ped & Cyc pred.", "CBDA", 1, 2, "Brown")
+
+        findings = consistency.find_prediction_inconsistencies(self.wb)
+
+        self.assertEqual({f.cell for f in findings}, {yellow})
+        self.assertNotIn(brown, {f.cell for f in findings})
 
     def test_dooring_ignores_grey_red_and_missing_response(self):
         # Red is never selected for testing, so it never reaches the

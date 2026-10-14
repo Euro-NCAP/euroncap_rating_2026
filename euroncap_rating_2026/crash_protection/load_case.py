@@ -94,7 +94,7 @@ class LoadCase(BaseModel):
         last_row_index = row_index
         for seat_row_index, seat_name, dummy_name in seats_info:
             dummy, parsed_row_index = Dummy.get_dummy_from_row(
-                dummy_name, df, seat_row_index
+                dummy_name, df, seat_row_index, load_case_name=load_case_name
             )
             seat = Seat(name=seat_name, dummy=dummy)
             seats.append(seat)

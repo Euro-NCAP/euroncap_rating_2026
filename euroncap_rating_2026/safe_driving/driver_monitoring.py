@@ -70,9 +70,37 @@ def pick_random_yes_cells(yes_cells_dict, n):
     return {k: yes_cells_dict[k] for k in picked_keys}
 
 
-GENERAL_REQUIREMENT_CSV_STRING = """Category;temp0;temp1;temp2;temp3;temp4;temp5;temp6;Value
-General requirements;;;;;;;;
-"""
+# Driver monitoring General requirements, one PASS/FAIL row each. The
+# non-functional-system information requirements also accept N/A, which
+# counts as a pass; the others reject it.
+GENERAL_REQUIREMENTS_PASS_FAIL = [
+    "Default ON at the start of every journey",
+    "Deactivation is not possible with a momentary single push on a button",
+    "Detection sensitivity shall not be manually adjustable",
+    "Continuous monitoring of the driver state",
+    "Speed activation condition for the distraction, microsleep, sleep and unresponsive driver states",
+    "Speed activation condition for the impairment driver states, when the vehicle is moving forward at a speed of at least 50 km/h",
+    "Assisted Driving prerequisite (≥50% of Driving collaboration and ≥50% of Driver monitoring)",
+]
+GENERAL_REQUIREMENTS_PASS_FAIL_NA = [
+    "Inform with visual and/or auditory cues of non functional system within 10 seconds after the driver obstructs the sensor by gripping the upper portion of the steering wheel",
+    "Inform with visual and/or auditory cues of non functional system within 10 seconds after the driver wears a cap",
+    "Inform with visual and/or auditory cues of non functional system within 10 seconds after the driver wears a hat",
+    "Inform with visual and/or auditory cues of non functional system within 10 seconds after the driver wears dark sunglasses",
+    "Inform with visual and/or auditory cues of non functional system within 10 seconds for a driver with long head hair fringe obscuring eyes",
+    "Inform with visual and/or auditory cues of non functional system within 10 seconds for a driver with thick eyelash makeup",
+    "Visual information about non-functional system shown permanently or every [10] minutes",
+]
+
+GENERAL_REQUIREMENT_CSV_STRING = (
+    "Category;Scenario;temp1;temp2;temp3;temp4;temp5;temp6;Value\n"
+    + "".join(
+        f"{'General requirements' if idx == 0 else ''};{requirement};;;;;;;\n"
+        for idx, requirement in enumerate(
+            GENERAL_REQUIREMENTS_PASS_FAIL + GENERAL_REQUIREMENTS_PASS_FAIL_NA
+        )
+    )
+)
 
 TRANSIENT_DM_SCORING_CSV_STRING = """
 Driver state,Distraction category,Glance target type,Movement type,Warning,Forward support,Lane support
@@ -89,6 +117,14 @@ Transient,Short distraction,Multi-target,Lizard,0.5,0.4,0.1
 Transient,Phone use,Basic phone use,Owl and lizard,1.25,1.0,0.25
 Transient,Phone use,Advanced phone use,Lizard,1.25,1.0,0.25
 """
+
+# Points lost when a claimed (all-green) Warning fails its verification and the
+# Intervention of that movement type was not verified itself.
+WARNING_FAIL_LOST_POINTS = {
+    "Long distraction": ("Forward support", "Lane support"),
+    "Short distraction": ("Lane support",),
+    "Phone use": ("Lane support",),
+}
 
 NON_TRANSIENT_DM_SCORING_CSV_STRING = """
 Task,Impairment type,Warning,Forward and lane support,Emergency function
@@ -340,6 +376,11 @@ def apply_prediction_consistency(table_processors: Dict[str, "TableProcessor"]) 
     Because selection filters on ``Color == "GREEN"``, a forced-RED group is simply never
     selected (by warning or intervention selection alike).
 
+    Every cell flipped this way -- i.e. one that was not already RED on its own --
+    is tagged ``GroupForcedRed``, so the prediction sheet can keep showing what the
+    OEM entered while selection still sees RED
+    (get_prediction_forced_red_coordinates).
+
     Mutates each TableProcessor's ``cell_dict`` in place. Must run before any selection.
     Non-transient has no movement type and is intentionally left untouched.
     """
@@ -366,6 +407,8 @@ def apply_prediction_consistency(table_processors: Dict[str, "TableProcessor"]) 
                 len(coords_list),
             )
             for c in coords_list:
+                if tp.cell_dict[c].get("Color") != "RED":
+                    tp.cell_dict[c]["GroupForcedRed"] = True
                 tp.cell_dict[c]["Color"] = "RED"
     logger.info(
         "[DM consistency] Inspected %d (Task, Movement type, Vehicle response) groups "
@@ -378,13 +421,15 @@ def apply_prediction_consistency(table_processors: Dict[str, "TableProcessor"]) 
 def get_prediction_forced_red_coordinates(
     table_processors: Dict[str, "TableProcessor"],
 ) -> List:
-    """Excel (row, col) coordinates (1-based) of every "DE - DM pred." cell whose
-    final Color is RED after ``apply_prediction_consistency`` has run.
+    """Excel (row, col) coordinates (1-based) of every "DE - DM pred." cell that is
+    RED for its own reason: the ones the OEM explicitly marked Red and the
+    required-but-blank ones (mapped to RED by get_cell_dict via the required mask).
 
-    This covers cells the OEM explicitly marked Red, required-but-blank cells, and
-    cells forced RED because they share a (Task, Movement type, Vehicle response)
-    group with one of those -- i.e. every cell that must render as a failure in
-    the prediction sheet, not just the one that originally triggered it.
+    Cells that are RED only because ``apply_prediction_consistency`` flipped the
+    group they sit in are excluded -- they carry ``GroupForcedRed``. A group may
+    legitimately mix Red and Green, and the OEM's own cells must come back in the
+    preprocessed sheet exactly as they were entered; the in-memory RED still
+    suppresses selection.
 
     ``TableProcessor.cell_dict`` keys are (row_idx, col_idx) into the table as read
     by pandas (header=0, columns A-F): row_idx 0 is Excel row 2, col_idx 0 is
@@ -393,7 +438,7 @@ def get_prediction_forced_red_coordinates(
     coordinates = []
     for tp in table_processors.values():
         for (row_idx, col_idx), info in tp.cell_dict.items():
-            if info.get("Color") == "RED":
+            if info.get("Color") == "RED" and not info.get("GroupForcedRed"):
                 coordinates.append((row_idx + 2, col_idx + 1))
     return coordinates
 
@@ -1257,51 +1302,6 @@ def preprocess(
     return final_df_verification_df, selected_test_points, forced_red_coordinates
 
 
-def clean_df_warning_score(df, verified_scenarios=None):
-    # For Long distraction only: if Warning score is 0, zero out the corresponding
-    # Intervention scores. Per WG agreement, this cascade does NOT apply to other
-    # distraction categories (e.g. Phone use), where warning and intervention are
-    # scored independently.
-    # The cascade is also skipped for any Intervention scenario that was independently
-    # verified (i.e. present in verified_scenarios). When verified_scenarios is None
-    # the old behaviour (always cascade) is preserved for backward compatibility.
-    for idx, row in df.iterrows():
-        scenario = row.get("Scenario", "")
-        category = row.get("Category", "")
-        score = row.get("Score", 0)
-        if "Long distraction" not in category:
-            continue
-        if (
-            isinstance(scenario, str)
-            and scenario.strip().endswith("Warning")
-            and score == 0
-        ):
-            scenario_prefix = " - ".join(scenario.strip().split(" - ")[:-1])
-            # Find all matching rows with same Category and Scenario prefix, but not "Warning"
-            mask = (
-                (df["Category"] == category)
-                & (df["Scenario"].str.startswith(scenario_prefix))
-                & (~df["Scenario"].str.endswith("Warning"))
-            )
-            for other_idx in df[mask].index:
-                if verified_scenarios is not None:
-                    other_key = (
-                        df.at[other_idx, "Category"],
-                        df.at[other_idx, "Scenario"],
-                    )
-                    if other_key in verified_scenarios:
-                        logger.debug(
-                            f"Skipping cascade for '{other_key}' — Intervention was independently verified"
-                        )
-                        continue
-                if df.at[other_idx, "Score"] != 0:
-                    logger.debug(
-                        f"Setting Score to 0 for Category='{category}', Scenario='{df.at[other_idx, 'Scenario']}' because corresponding Warning is 0"
-                    )
-                df.at[other_idx, "Score"] = 0
-    return df
-
-
 def compute_transient_score(
     transient_df, dm_prediction_df, dm_colors, transient_score_df
 ):
@@ -1339,24 +1339,26 @@ def compute_transient_score(
     AND
     All verification rows for vs (if any) are PASS
     Then assign score (usually 0.5, 0.4, 0.1)
-    Warning and Intervention are scored independently EXCEPT for Long distraction:
-    for Long distraction only, if warning score is 0 then FS and LS scores are also
-    zeroed out (per WG agreement, see clean_df_warning_score). For Phone use, warning
-    and intervention are fully independent.
-
-    On top of that (per updated Euro NCAP requirements): for Long and Short distraction
-    specifically, if a movement type's Warning predictions are all GREEN but at least one
-    Warning verification test still failed, the corresponding intervention is forced to 0
-    as well -- FS+LS for Long distraction, LS only for Short distraction -- unconditionally,
-    even if FS/LS had their own independently-passing verification. This is tracked via
-    warning_hard_fail and applied in the Intervention branch below; it is independent of
-    (and unaffected by) the separate red-prediction cascade in clean_df_warning_score.
+    Warning and Intervention are scored independently, with one exception (Step 7):
+    if a movement type's Warning predictions are all GREEN but at least one Warning
+    verification test failed, the Intervention of that movement type is affected.
+    If the Intervention was verified itself, its own outcome decides both FS and LS
+    (all PASS -> both score, any FAIL -> both lost). If it was not verified, the
+    points in WARNING_FAIL_LOST_POINTS are lost: FS+LS for Long distraction, LS only
+    for Short distraction and Phone use. A Warning that is only predicted RED costs
+    the Warning points only.
     """
 
-    verified_scenarios = set()
     warning_hard_fail = {}
 
-    for score_idx, score_row in transient_score_df.iterrows():
+    # Warning rows first, so the Intervention branch always sees the hard-fail flag.
+    is_warning = transient_score_df["Scenario"].str.strip().str.endswith("Warning")
+    score_order = list(transient_score_df.index[is_warning]) + list(
+        transient_score_df.index[~is_warning]
+    )
+
+    for score_idx in score_order:
+        score_row = transient_score_df.loc[score_idx]
 
         group_key = score_row["Scenario"]
         logger.info(f"Processing group: {group_key}")
@@ -1390,9 +1392,6 @@ def compute_transient_score(
             in transient_grouped.groups
             else pd.DataFrame()
         )
-
-        if len(group_df) > 0:
-            verified_scenarios.add((score_row["Category"], score_row["Scenario"]))
 
         if task_str == "Phone use":
             glance_target_type = glance_target_type + " phone use"
@@ -1437,26 +1436,6 @@ def compute_transient_score(
                 c == common.PredictionColor.GREEN for c in ls_colors
             )
 
-            movement_prefix = f"{glance_target_type} - {movement_type}"
-            hard_fail = warning_hard_fail.get(
-                (score_row["Category"], movement_prefix), False
-            )
-            if hard_fail and task_str == "Long distraction":
-                fs_green = False
-                ls_green = False
-                logger.info(
-                    f"  - Forcing FS and LS to 0 for {score_row['Category']} / "
-                    f"{movement_prefix}: Warning hard-fail cascade "
-                    "(predictions GREEN but a verification test failed)"
-                )
-            elif hard_fail and task_str == "Short distraction":
-                ls_green = False
-                logger.info(
-                    f"  - Forcing LS to 0 for {score_row['Category']} / "
-                    f"{movement_prefix}: Warning hard-fail cascade "
-                    "(predictions GREEN but a verification test failed)"
-                )
-
             logger.debug(
                 f"Forward support green: {fs_green}, Lane support green: {ls_green}"
             )
@@ -1486,6 +1465,41 @@ def compute_transient_score(
                 # unassessed (NaN) rather than scoring it as a FAIL (0.0).
                 transient_score_df.at[score_idx, "Score"] = np.nan
                 continue
+
+            movement_prefix = f"{glance_target_type} - {movement_type}"
+            if warning_hard_fail.get((score_row["Category"], movement_prefix), False):
+                intervention_rows = (
+                    group_df[
+                        group_df["Requirement"].isin(
+                            ["Forward support", "Lane support"]
+                        )
+                    ]
+                    if len(group_df)
+                    else group_df
+                )
+                if len(intervention_rows) > 0:
+                    # Intervention was verified: its outcome decides for both strategies.
+                    intervention_pass = (
+                        intervention_rows["Value"].apply(
+                            common.classify_pass_fail_value
+                        )
+                        == "pass"
+                    ).all()
+                    fs_test_pass = ls_test_pass = intervention_pass
+                    logger.info(
+                        f"  - Warning hard-fail for {score_row['Category']} / "
+                        f"{movement_prefix}: Intervention verified, "
+                        f"pass={intervention_pass} decides FS and LS"
+                    )
+                else:
+                    lost = WARNING_FAIL_LOST_POINTS[task_str]
+                    fs_green = fs_green and "Forward support" not in lost
+                    ls_green = ls_green and "Lane support" not in lost
+                    logger.info(
+                        f"  - Warning hard-fail for {score_row['Category']} / "
+                        f"{movement_prefix}: Intervention not verified, "
+                        f"{' and '.join(lost)} lost"
+                    )
 
             scoring_filter = (
                 transient_dm_scoring_df["Glance target type"] == glance_target_type
@@ -1549,7 +1563,7 @@ def compute_transient_score(
                 continue
 
             if (
-                task_str in ("Long distraction", "Short distraction")
+                task_str in WARNING_FAIL_LOST_POINTS
                 and all_prediction_green
                 and any_test_failed
             ):
@@ -1559,7 +1573,7 @@ def compute_transient_score(
                 logger.info(
                     f"  - Warning hard-fail: predictions all GREEN but a verification "
                     f"test failed for {score_row['Category']} / {glance_target_type} - "
-                    f"{movement_type} — forcing FS/LS to 0 for this movement type"
+                    f"{movement_type}"
                 )
 
             candidate_score = float(
@@ -1579,8 +1593,6 @@ def compute_transient_score(
                     f"  - all cells GREEN and all tests PASS, setting {candidate_score} to {score_row['Category']}-{score_row['Scenario']}"
                 )
                 transient_score_df.at[score_idx, "Score"] = float(candidate_score)
-
-    transient_score_df = clean_df_warning_score(transient_score_df, verified_scenarios)
 
     return transient_score_df
 
@@ -1607,7 +1619,6 @@ def compute_non_transient_score(
             [non_fatigue_row, non_transient_df], ignore_index=True
         )
 
-    non_transient_grouped = non_transient_df.groupby(["Category", "Scenario"])
     non_transient_table_processor = TableProcessor(dm_prediction_df, "Non-transient")
 
     non_transient_table_processor.processed_df.ffill(inplace=True)
@@ -1642,14 +1653,13 @@ def compute_non_transient_score(
         logger.debug(f"#### Impairment type: {impairment_type}")
         logger.debug(f"#### Requirement: {requirement_str}")
 
-        group_df = (
-            non_transient_grouped.get_group(
-                (f"{transient_str} - {task_str}", requirement_str)
-            )
-            if (f"{transient_str} - {task_str}", requirement_str)
-            in non_transient_grouped.groups
-            else pd.DataFrame()
-        )
+        # Select by Requirement, not Scenario: the preprocess writes Scenario
+        # "Intervention" for every non-transient intervention row, while
+        # Requirement holds the vehicle response being checked.
+        group_df = non_transient_df[
+            (non_transient_df["Category"] == f"{transient_str} - {task_str}")
+            & (non_transient_df["Requirement"] == requirement_str)
+        ]
         non_transient_table_processor = TableProcessor(
             dm_prediction_df, "Non-transient"
         )
@@ -1725,8 +1735,6 @@ def compute_non_transient_score(
                 f"  - all cells GREEN and all tests PASS, setting {candidate_score} to {score_row['Category']}-{score_row['Scenario']}"
             )
             non_transient_score_df.at[score_idx, "Score"] = float(candidate_score)
-
-    non_transient_score_df = clean_df_warning_score(non_transient_score_df)
 
     return non_transient_score_df
 
@@ -1830,6 +1838,23 @@ def get_dm_colors_combined(
     return dm_colors
 
 
+def classify_general_requirement(row) -> str:
+    """ "pass", "fail" or "blank" for one General requirements row. N/A
+    counts as a pass on the requirements that allow it; elsewhere it is not
+    an accepted answer and leaves the requirement blank (not assessed)."""
+    value = row["Value"]
+    if not common.is_not_applicable(value):
+        return common.classify_pass_fail_value(value)
+    requirement = str(row.get("Scenario", "") or "").strip()
+    if requirement in GENERAL_REQUIREMENTS_PASS_FAIL_NA:
+        return "pass"
+    logger.warning(
+        f"General requirement '{requirement}' does not accept N/A; "
+        "treating it as not assessed."
+    )
+    return "blank"
+
+
 def compute_score(dfs):
 
     transient_score_data = [
@@ -1920,9 +1945,7 @@ def compute_score(dfs):
     if general_req_rows.empty:
         logging.warning("General requirements section is missing.")
 
-    general_req_states = general_req_rows["Value"].apply(
-        common.classify_pass_fail_value
-    )
+    general_req_states = general_req_rows.apply(classify_general_requirement, axis=1)
 
     if (general_req_states == "blank").any():
         logging.info(
@@ -1936,11 +1959,21 @@ def compute_score(dfs):
         logging.info("One or more General requirements failed. Keeping score to 0.")
         return score_df
 
-    driver_state_header_idx = 2
-    # Create driver_state_df from dm_verification_df starting from row 9 (header)
+    # The test-point table header follows the General requirements rows and
+    # a blank separator row; its position depends on how many requirement
+    # rows the sheet has.
+    driver_state_header_idx = np.flatnonzero(
+        (dm_verification_df["Category"] == "Category").to_numpy()
+    )[0]
+    # Create driver_state_df from dm_verification_df starting from the header row
     driver_state_df = pd.DataFrame(
         dm_verification_df.values[driver_state_header_idx + 1 :],
         columns=dm_verification_df.iloc[driver_state_header_idx].tolist(),
+    )
+    # "N/A" is kept on read for the General requirements rows only; a stray
+    # "N/A" in a test-point Value stays blank (not yet assessed).
+    driver_state_df["Value"] = driver_state_df["Value"].mask(
+        driver_state_df["Value"].apply(common.is_not_applicable)
     )
     driver_state_df = driver_state_df.dropna(how="all")
 

@@ -116,6 +116,55 @@ PASSTHROUGH_SHEETS = [
 
 PRISTINE_TEMPLATE_NAME = "sd_template.xlsx"
 
+# Registry: protocol id -> absolute path of that protocol's master template.
+# The Euro NCAP master is built in; another programme's package registers
+# its own (register_pristine_template) when imported. A registered master
+# is expected to differ from the Euro NCAP one only where that programme's
+# Speed Assistance profile differs (see speed_assistance.SpeedAssistanceProfile).
+PRISTINE_TEMPLATE_PATHS = {
+    common.Protocol.ENCAP_26_28.value: str(
+        files("data").joinpath(PRISTINE_TEMPLATE_NAME)
+    ),
+}
+
+
+def register_pristine_template(protocol, path: str) -> str:
+    """Register the master template *path* for *protocol* (which must already
+    be registered, see common.register_protocol). Registering the same path
+    twice is a no-op; a different path for an existing protocol raises."""
+    protocol = common.normalize_protocol(protocol)
+    # Stored absolute: a caller that registers a relative path and later
+    # changes directory must still find the master.
+    path = os.path.abspath(str(path))
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Master template for '{protocol}' not found: {path}")
+    existing = PRISTINE_TEMPLATE_PATHS.get(protocol)
+    if existing is not None and os.path.abspath(existing) != os.path.abspath(path):
+        raise ValueError(
+            f"A master template is already registered for '{protocol}' "
+            f"({existing}); refusing to replace it with {path}."
+        )
+    PRISTINE_TEMPLATE_PATHS[protocol] = path
+    return path
+
+
+def pristine_template_path(protocol=None) -> str:
+    """Path to the master template for *protocol* (None = Euro NCAP)."""
+    protocol = common.normalize_protocol(protocol)
+    try:
+        return PRISTINE_TEMPLATE_PATHS[protocol]
+    except KeyError:
+        raise ValueError(
+            f"No Safe Driving master template is registered for protocol '{protocol}'."
+        ) from None
+
+
+def pristine_template_name(protocol=None) -> str:
+    """File name of the master template for *protocol* (None = Euro NCAP);
+    also the name generate-template writes."""
+    return os.path.basename(pristine_template_path(protocol))
+
+
 # Sheet -> columns that are only ever produced by compute-score, never by
 # the OEM or preprocess. "Test Scores"/"Category Scores" come from the
 # schemas that declare the trust boundary; "Scenario Scores" is deliberately
@@ -148,12 +197,16 @@ GRID_SHEET_STAGE_ELEMENTS = {
 }
 
 
-def rebuild_trusted_input(user_file_path: str) -> str:
+def rebuild_trusted_input(user_file_path: str, protocol=None) -> str:
     """Build a sanitized copy of *user_file_path* where every protected
     reference/structural cell (Max score, row labels, ...) is sourced from
     the official packaged template instead of the user-supplied file, and
     only the designated grey input cells (Value) are carried over from the
     user.
+
+    *protocol* selects which packaged master is the reference; None reads
+    the marker in the user file's Version sheet and falls back to Euro NCAP
+    (common.resolve_protocol).
 
     Returns the path to a new temporary .xlsx file. The caller is
     responsible for deleting it.
@@ -163,9 +216,11 @@ def rebuild_trusted_input(user_file_path: str) -> str:
     template's row identity structure (inserted, deleted, or reordered
     rows).
     """
-    pristine_path = str(files("data").joinpath(PRISTINE_TEMPLATE_NAME))
     user_wb = openpyxl.load_workbook(user_file_path, data_only=True)
     try:
+        pristine_path = pristine_template_path(
+            common.resolve_protocol(protocol, wb=user_wb)
+        )
         trusted_wb = common.rebuild_trusted_workbook(
             pristine_path, user_wb, SHEET_SCHEMAS, PASSTHROUGH_SHEETS
         )
@@ -178,28 +233,31 @@ def rebuild_trusted_input(user_file_path: str) -> str:
     return sanitized_path
 
 
-@functools.lru_cache(maxsize=1)
-def _pristine_dfs() -> dict:
-    """The packaged pristine template loaded as a dict of DataFrames, cached
-    for the lifetime of the process. Backing rebuild_trusted_input_dfs,
+@functools.lru_cache(maxsize=None)
+def _pristine_dfs(protocol: str = common.DEFAULT_PROTOCOL) -> dict:
+    """The packaged pristine template for *protocol* loaded as a dict of
+    DataFrames, cached for the lifetime of the process. Backing rebuild_trusted_input_dfs,
     which -- unlike rebuild_trusted_input -- can be called on every single
     get_updated_dfs(dfs)/add_verification_sheets_to_dfs invocation by a long-running
     caller, not once per CLI process; re-parsing the template file on
     every call would be a real, avoidable cost."""
-    pristine_path = str(files("data").joinpath(PRISTINE_TEMPLATE_NAME))
+    pristine_path = pristine_template_path(protocol)
     dfs = common.read_excel_file_to_dfs(pristine_path)
     # "Scenario Scores" is PASSTHROUGH, never overlaid onto user data by
     # rebuild_trusted_dfs, so numericizing it here is safe.
     return common.numericize_computed_columns(dfs, COMPUTED_SHEET_COLUMNS)
 
 
-def rebuild_trusted_input_dfs(user_dfs: dict) -> dict:
+def rebuild_trusted_input_dfs(user_dfs: dict, protocol=None) -> dict:
     """DataFrame-native sibling of rebuild_trusted_input: same SHEET_SCHEMAS
     and PASSTHROUGH_SHEETS, same pristine template, but operating directly
     on a dict of DataFrames instead of an on-disk .xlsx file -- for callers
     (e.g. an application that parses an upload once and works in dataframe/
     parquet land afterwards) that never have the file/openpyxl workbook
     rebuild_trusted_input needs.
+
+    *protocol* selects the packaged master; None reads the marker in
+    user_dfs["Version"] and falls back to Euro NCAP.
 
     Returns a copy of *user_dfs* with every protected reference cell (Max
     score, row labels, ...) in a schema'd sheet sourced from the official
@@ -212,20 +270,20 @@ def rebuild_trusted_input_dfs(user_dfs: dict) -> dict:
     template's row identity structure (inserted, deleted, or reordered
     rows).
     """
+    protocol = common.resolve_protocol(protocol, dfs=user_dfs)
     return common.rebuild_trusted_dfs(
-        _pristine_dfs(), user_dfs, SHEET_SCHEMAS, PASSTHROUGH_SHEETS
+        _pristine_dfs(protocol), user_dfs, SHEET_SCHEMAS, PASSTHROUGH_SHEETS
     )
 
 
-@functools.lru_cache(maxsize=1)
-def _pristine_wb():
-    """The packaged pristine template as an openpyxl Workbook, cached for
-    the lifetime of the process -- backs find_missing_required_inputs'
+@functools.lru_cache(maxsize=None)
+def _pristine_wb(protocol: str = common.DEFAULT_PROTOCOL):
+    """The packaged pristine template for *protocol* as an openpyxl
+    Workbook, cached for the lifetime of the process -- backs find_missing_required_inputs'
     grid-sheet checks, which read the template's Data Validation ranges
     fresh from the pristine file rather than from the user's own workbook.
     """
-    pristine_path = str(files("data").joinpath(PRISTINE_TEMPLATE_NAME))
-    return openpyxl.load_workbook(pristine_path)
+    return openpyxl.load_workbook(pristine_template_path(protocol))
 
 
 # Every (Stage element, Stage subelement) pair this domain's sheets use --
@@ -251,7 +309,7 @@ VALID_SCOPE_PAIRS = [
 
 
 def find_missing_required_inputs(
-    wb, stage_element: str = None, stage_subelement: str = None
+    wb, stage_element: str = None, stage_subelement: str = None, protocol=None
 ) -> list:
     """Find empty cells the OEM is required to fill in for the safe_driving
     domain, optionally scoped to one protocol element (e.g.
@@ -271,17 +329,22 @@ def find_missing_required_inputs(
     TemplateIntegrityError is swallowed in favour of just the version
     finding: a "wrong template version" message is strictly more useful
     than the low-level column-name error it would otherwise surface.
+
+    *protocol* selects the packaged master the grid sheets are checked
+    against; None reads the marker in *wb*'s Version sheet and falls back
+    to Euro NCAP.
     """
     common.validate_scope(
         stage_element, stage_subelement, VALID_SCOPE_PAIRS, "safe_driving"
     )
+    protocol = common.resolve_protocol(protocol, wb=wb)
     version_mismatch = common.find_version_mismatch(wb)
     try:
         missing = version_mismatch + common.find_missing_required_inputs(
             wb, SHEET_SCHEMAS, stage_element, stage_subelement
         )
 
-        pristine_wb = _pristine_wb()
+        pristine_wb = _pristine_wb(protocol)
         for sheet_name, applies_to in GRID_SHEET_STAGE_ELEMENTS.items():
             if sheet_name not in wb.sheetnames:
                 continue
@@ -302,28 +365,35 @@ def find_missing_required_inputs(
 
 
 def find_missing_required_inputs_in_file(
-    input_file: str, stage_element: str = None, stage_subelement: str = None
+    input_file: str,
+    stage_element: str = None,
+    stage_subelement: str = None,
+    protocol=None,
 ) -> list:
     """Load an Excel file and return find_missing_required_inputs() for it."""
     wb = openpyxl.load_workbook(input_file, data_only=True)
     try:
-        return find_missing_required_inputs(wb, stage_element, stage_subelement)
+        return find_missing_required_inputs(
+            wb, stage_element, stage_subelement, protocol=protocol
+        )
     finally:
         wb.close()
 
 
 def find_consistency_findings(
-    wb, stage_element: str = None, stage_subelement: str = None
+    wb, stage_element: str = None, stage_subelement: str = None, protocol=None
 ) -> list:
     """One list of findings covering every consistency rule this domain
     declares: the missing required inputs
     (find_missing_required_inputs) plus every report-only prediction-rule
     violation (consistency.find_prediction_inconsistencies --
-    dm_group_consistency). Each finding says which rule produced it in
+    stale_acc_cut_out). Each finding says which rule produced it in
     ``check`` (common.CHECK_*). Same scope convention and error behaviour
     as find_missing_required_inputs: ValueError for an undeclared scope,
     common.TemplateIntegrityError for structural problems."""
-    findings = find_missing_required_inputs(wb, stage_element, stage_subelement)
+    findings = find_missing_required_inputs(
+        wb, stage_element, stage_subelement, protocol=protocol
+    )
     findings.extend(
         consistency.find_prediction_inconsistencies(wb, stage_element, stage_subelement)
     )
@@ -331,11 +401,16 @@ def find_consistency_findings(
 
 
 def find_consistency_findings_in_file(
-    input_file: str, stage_element: str = None, stage_subelement: str = None
+    input_file: str,
+    stage_element: str = None,
+    stage_subelement: str = None,
+    protocol=None,
 ) -> list:
     """Load an Excel file and return find_consistency_findings() for it."""
     wb = openpyxl.load_workbook(input_file, data_only=True)
     try:
-        return find_consistency_findings(wb, stage_element, stage_subelement)
+        return find_consistency_findings(
+            wb, stage_element, stage_subelement, protocol=protocol
+        )
     finally:
         wb.close()

@@ -71,7 +71,7 @@ class TestSafeDrivingGetUpdatedDfs(unittest.TestCase):
             patch.object(
                 safe_driving_compute_score.integrity,
                 "rebuild_trusted_input_dfs",
-                side_effect=lambda d: d,
+                side_effect=lambda d, **_kwargs: d,
             ),
             patch.object(
                 safe_driving_compute_score.seatbelt_usage,

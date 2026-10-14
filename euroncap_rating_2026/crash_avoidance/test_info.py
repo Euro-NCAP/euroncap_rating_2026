@@ -119,15 +119,22 @@ class LoadcaseInfo:
             ]
 
         # Remove from filtered test points some corner cases referring to the protocol:
-        # CCRb with target speed >80 km/h
+        # CCRb with target speed >100 km/h
         # CCFhos: every cell except the pinned CCFHOS_PINNED_TEST_POINT
         # CCFhol: every cell
         # CMRb with target speed >80 km/h
         # CCFtap and CMFtap with target speed >60 km/h
         # CCCscp and CMCscp with target speed >60 km/h
         # CM ELK On and CM ELK Ov with target speed >80 km/h
+        # CC ELK On/OvU/OvI with target speed >100 km/h
         # ELK RE with VUT speed >80 km/h
-        # CC ELK On and CC ELK Ov with target speed >80 km/h
+        #
+        # LDC v1.2 4.1.3 writes the ELK overtaking clause for the
+        # Car-to-Motorcyclist scenarios only. Euro NCAP confirmed that omission
+        # is a typo and that the clause covers the Car-to-Car ELK scenarios as
+        # well, at the >100 km/h GVT speed FC v1.2 4.1.3 uses for CCRb. Only
+        # CC ELK OvU actually reaches above 100 km/h in the template; CC ELK On
+        # and OvI stop at 100.
 
         def get_speed(attr, key):
             val = attr.get(key, 0)
@@ -147,7 +154,7 @@ class LoadcaseInfo:
             if not (
                 (
                     self.test_name.startswith("CCRb")
-                    and get_speed(tp.attributes, "Target speed") > 80
+                    and get_speed(tp.attributes, "Target speed") > 100
                 )
                 or (
                     # CCFhos is a Corner Case in full bar one cell (CA Frontal
@@ -181,12 +188,12 @@ class LoadcaseInfo:
                     and get_speed(tp.attributes, "Target speed") > 80
                 )
                 or (
-                    self.test_name.startswith("ELK RE")
-                    and get_speed(tp.attributes, "VUT speed") > 80
+                    self.test_name.startswith("CC ELK")
+                    and get_speed(tp.attributes, "Target speed") > 100
                 )
                 or (
-                    self.test_name.startswith("CC ELK")
-                    and get_speed(tp.attributes, "Target speed") > 80
+                    self.test_name.startswith("ELK RE")
+                    and get_speed(tp.attributes, "VUT speed") > 80
                 )
             )
         ]
@@ -511,9 +518,24 @@ def canonical_attribute_key(attrs: dict, key: str) -> str:
     return aliases[0]
 
 
+def is_lsc_corner_case(test_name, tp) -> bool:
+    """LSC v1.2 4.1.2: CMFtap and CMCscp (SfS) cells with target speed > 60 km/h
+    are Corner Cases -- the Vehicle Manufacturer supplies in-house track data
+    for them, the lab never runs them as verification tests."""
+    if not test_name.startswith(("CMFtap", "CMCscp")):
+        return False
+    val = tp.attributes.get("Target speed", 0)
+    try:
+        val = val.replace(" km/h", "") if isinstance(val, str) else val
+        return float(val) > 60
+    except (TypeError, ValueError):
+        return False
+
+
 def get_all_lsc_points(loadcase_info):
     """
-    Low speed collision point selection criteria: select all non-grey points.
+    Low speed collision point selection criteria: select all non-grey,
+    non-red points that are not Corner Cases (see is_lsc_corner_case).
     """
     test_name = loadcase_info.test_name
     test_points = loadcase_info.test_points
@@ -522,6 +544,7 @@ def get_all_lsc_points(loadcase_info):
         tp
         for tp in test_points
         if tp.color not in (common.PredictionColor.GREY, common.PredictionColor.RED)
+        and not is_lsc_corner_case(test_name, tp)
     ]
     return SelectionInfo(
         test_name=test_name,
@@ -556,6 +579,7 @@ def get_lsc_selected_points(loadcase_info):
             common.PredictionColor.RED,
             common.PredictionColor.GREY,
         )
+        and not is_lsc_corner_case(test_name, tp)
     ]
 
     # CPMRCm: Test 1.00 and 2.00m gaps for all EPTc speeds.
@@ -743,6 +767,10 @@ def compute_robustness_layer_score(robustness_layers_df, loadcase_key, subtest_n
         / number_of_applicable_robustness_layers
         * not_tested_claimed_robustness_layers_num
     )
+    # Nothing claimed: nothing to award, and nothing to take back on a failure.
+    if number_of_claimed_robustness_layers == 0:
+        robustness_layer_tested_score = 0.0
+        robustness_layer_contant_score = 0.0
 
     logger.debug(
         f"Calculated robustness score for {subtest_name}: {robustness_layer_contant_score}"
@@ -1135,75 +1163,137 @@ def get_extended_range_performance(dfs):
     return None if raw is None else str(raw).strip().lower()
 
 
-# The LSC dooring rule (CBDA): which predicted colours the workbook's
-# "Vehicle response" input parameter allows. Shared by the blocking
-# preprocess check (check_lsc_consistency) and the report-only collector
-# (consistency.find_prediction_inconsistencies), so the rule cannot drift
-# between the two.
-DOORING_ALLOWED_COLORS = {
-    data_model.VehicleResponse.INFORMATION: (common.PredictionColor.BROWN,),
-    data_model.VehicleResponse.WARNING: (
-        common.PredictionColor.ORANGE,
-        common.PredictionColor.YELLOW,
-    ),
-    data_model.VehicleResponse.RETENTION: (
-        common.PredictionColor.GREEN,
-        common.PredictionColor.YELLOW,
-    ),
-}
+# The LSC dooring rule (CBDA): the workbook's "Vehicle response" input
+# parameter states the *best* the system can do. The OEM may predict any
+# colour equal to or worse than that ceiling (data_model.LSC_COLOR_RANK /
+# VEHICLE_RESPONSE_BEST_COLOR); Grey (not predicted) is always allowed. Shared
+# by the blocking preprocess check (check_lsc_consistency) and the report-only
+# collector (consistency.find_prediction_inconsistencies), so the rule cannot
+# drift between the two.
+def dooring_allowed_colors(vehicle_response_enum):
+    """Colours the rank rule allows for *vehicle_response_enum*, best first,
+    or None for an unknown/None vehicle response."""
+    best = data_model.VEHICLE_RESPONSE_BEST_COLOR.get(vehicle_response_enum)
+    if best is None:
+        return None
+    ceiling = data_model.LSC_COLOR_RANK[best]
+    return tuple(
+        color
+        for color, rank in sorted(
+            data_model.LSC_COLOR_RANK.items(), key=lambda item: -item[1]
+        )
+        if rank <= ceiling
+    )
+
+
+def is_dooring_color_allowed(color, vehicle_response_enum):
+    """True when *color* is Grey or ranks equal to or below the best colour the
+    claimed *vehicle_response_enum* can achieve."""
+    if color == common.PredictionColor.GREY:
+        return True
+    best = data_model.VEHICLE_RESPONSE_BEST_COLOR.get(vehicle_response_enum)
+    rank = data_model.LSC_COLOR_RANK.get(color)
+    if best is None or rank is None:
+        return False
+    return rank <= data_model.LSC_COLOR_RANK[best]
 
 
 def collect_lsc_consistency_violations(test_points, vehicle_response_enum):
-    """Every dooring test point whose colour DOORING_ALLOWED_COLORS forbids
-    for *vehicle_response_enum* -- all of them, not just the first. Returns
-    an empty list for an unknown/None vehicle response (nothing to compare
-    against; the missing-input check owns reporting the empty parameter)."""
-    allowed_colors = DOORING_ALLOWED_COLORS.get(vehicle_response_enum)
-    if allowed_colors is None:
+    """Every dooring test point whose colour is *better* than what
+    *vehicle_response_enum* can achieve -- all of them, not just the first.
+    Returns an empty list for an unknown/None vehicle response (nothing to
+    compare against; the missing-input check owns reporting the empty
+    parameter)."""
+    if vehicle_response_enum not in data_model.VEHICLE_RESPONSE_BEST_COLOR:
         logger.warning("Unknown vehicle response: %s", vehicle_response_enum)
         return []
-    return [tp for tp in test_points if tp.color not in allowed_colors]
+    return [
+        tp
+        for tp in test_points
+        if not is_dooring_color_allowed(tp.color, vehicle_response_enum)
+    ]
 
 
 def check_lsc_consistency(test_points, vehicle_response_enum):
-    if not test_points:
+    """Blocking CBDA check over the whole matrix: Grey cells are skipped; an
+    all-Grey (unfilled) matrix passes whatever the vehicle response."""
+    predicted_points = [
+        tp for tp in test_points if tp.color != common.PredictionColor.GREY
+    ]
+    if not predicted_points:
         return True
-    if vehicle_response_enum not in DOORING_ALLOWED_COLORS:
+    if vehicle_response_enum not in data_model.VEHICLE_RESPONSE_BEST_COLOR:
         logger.warning("Unknown vehicle response: %s", vehicle_response_enum)
         return False
 
-    violations = collect_lsc_consistency_violations(test_points, vehicle_response_enum)
+    violations = collect_lsc_consistency_violations(
+        predicted_points, vehicle_response_enum
+    )
     for tp in violations:
         logger.error(
-            f"Test point at row {tp.row}, col {tp.col} has color {tp.color}, which is not allowed for vehicle response {vehicle_response_enum}."
+            f"Test point at row {tp.row}, col {tp.col} has color {tp.color}, which is better than vehicle response {vehicle_response_enum} can achieve."
         )
     return not violations
 
 
-def add_door_attribute(test_points, vehicle_response_enum):
-    if vehicle_response_enum == data_model.VehicleResponse.INFORMATION:
-        for tp in test_points:
-            tp.attributes["Door selected"] = "Driver"
-    elif vehicle_response_enum == data_model.VehicleResponse.WARNING:
-        for tp in test_points:
-            if tp.color == common.PredictionColor.ORANGE:
-                tp.attributes["Door selected"] = "Driver"
-            elif tp.color == common.PredictionColor.YELLOW:
-                tp.attributes["Door selected"] = random.choice(
-                    ["Driver", "Passenger", "Behind driver", "Behind passenger"]
-                )
-    elif vehicle_response_enum == data_model.VehicleResponse.RETENTION:
-        for tp in test_points:
-            if tp.color == common.PredictionColor.GREEN:
-                tp.attributes["Door selected"] = random.choice(
-                    ["Driver", "Passenger", "Behind driver", "Behind passenger"]
-                )
-            elif tp.color == common.PredictionColor.YELLOW:
-                tp.attributes["Door selected"] = "Driver"
+# CBDA door selection. Only two (Vehicle response, predicted colour) pairs
+# claim *all* doors; they are verified on a door other than the driver's, drawn
+# at random. Every other allowed pair can only score on the driver's door and
+# gets "Driver". Kept as an allow-list so a colour added later cannot land in
+# the all-door pool by accident.
+DOORING_ALL_DOOR_CLAIMS = frozenset(
+    {
+        (data_model.VehicleResponse.RETENTION, common.PredictionColor.GREEN),
+        (data_model.VehicleResponse.WARNING, common.PredictionColor.YELLOW),
+    }
+)
+DRIVER_DOOR = data_model.DRIVER_DOOR
+NON_DRIVER_DOORS = data_model.NON_DRIVER_DOORS
+DOOR_SELECTED_COLUMN = "Door selected"
+# Tool-filled column on the verification sheet: which dooring function actually
+# acted on that test point (Information / Warning / Retention). Preprocess
+# emits it blank; the downstream evaluation tool (not this package) fills it
+# from the measured dooring KPI, on the same pass as
+# "Value"; compute-score reads it per row.
+TYPE_OF_SYSTEM_COLUMN = "Type of system"
 
+
+def _is_blank_attribute(value):
+    return (
+        value is None
+        or (isinstance(value, float) and pd.isna(value))
+        or (isinstance(value, str) and not value.strip())
+    )
+
+
+def select_dooring_door(vehicle_response_enum, color):
+    """Door for one CBDA verification row, from the (Vehicle response,
+    predicted colour) pair."""
+    if (vehicle_response_enum, color) in DOORING_ALL_DOOR_CLAIMS:
+        return random.choice(NON_DRIVER_DOORS)
+    return DRIVER_DOOR
+
+
+def add_dooring_columns(test_points, vehicle_response_enum):
+    """Add the CBDA-only verification columns to *test_points*.
+
+    - "Door selected": tool-assigned from the (Vehicle response, colour) pair,
+      but only where the point has no door yet -- on the input-points path the
+      stored door is injected by select_points_from_input and must not be
+      re-rolled between two evaluator passes.
+    - "Type of system": seeded blank ("" rather than None/NaN, so pandas keeps
+      a real column through the header reorder); a stored value is kept.
+    - "Function" is not a CBDA column any more (the dooring function is the
+      tool-filled "Type of system"); a stale stored value is dropped.
+    """
     for tp in test_points:
-        tp.attributes["Function"] = vehicle_response_enum.value.capitalize()
-
+        if _is_blank_attribute(tp.attributes.get(DOOR_SELECTED_COLUMN)):
+            tp.attributes[DOOR_SELECTED_COLUMN] = select_dooring_door(
+                vehicle_response_enum, tp.color
+            )
+        if _is_blank_attribute(tp.attributes.get(TYPE_OF_SYSTEM_COLUMN)):
+            tp.attributes[TYPE_OF_SYSTEM_COLUMN] = ""
+        tp.attributes.pop("Function", None)
     return test_points
 
 
@@ -1346,12 +1436,15 @@ def preprocess_stage_subelement(
             selected_standard_points = selected_info.standard_points
             selected_extended_points = selected_info.extended_points
 
-            if is_dooring and not using_input_points and selected_standard_points:
-                if common.is_not_applicable(
+            if is_dooring:
+                raw_vehicle_response = (
                     _get_raw_input_parameter(
                         dfs["Input parameters"], "Vehicle response"
                     )
-                ):
+                    if "Input parameters" in dfs
+                    else None
+                )
+                if common.is_not_applicable(raw_vehicle_response):
                     # An explicit "N/A" Vehicle response means no dooring
                     # system is fitted: the scenario is not claimed (it
                     # scores 0 at compute time), so the dooring colour rule
@@ -1361,8 +1454,11 @@ def preprocess_stage_subelement(
                         f"consistency check for scenario {loadcase_name}."
                     )
                 else:
+                    # Checked over the full matrix and on both selection
+                    # branches: the input-points branch is the evaluator's
+                    # second pass, the one that actually produces the sheet.
                     check_result = check_lsc_consistency(
-                        selected_standard_points, vehicle_response_enum
+                        loadcase_info.test_points, vehicle_response_enum
                     )
                     if not check_result:
                         raise ValueError(
@@ -1372,7 +1468,7 @@ def preprocess_stage_subelement(
                         logger.info(
                             f"LSC consistency check passed for scenario {loadcase_name} with vehicle response {vehicle_response_enum}."
                         )
-                    selected_standard_points = add_door_attribute(
+                    selected_standard_points = add_dooring_columns(
                         selected_standard_points, vehicle_response_enum
                     )
 
@@ -1442,14 +1538,6 @@ def preprocess_stage_subelement(
             ):
                 expected_value = "fcw_ttc"
 
-            if is_dooring:
-                if vehicle_response_enum == data_model.VehicleResponse.RETENTION:
-                    expected_value = "TTC @ t_door_opening"
-                elif vehicle_response_enum == data_model.VehicleResponse.WARNING:
-                    expected_value = "TTC @ t_warning"
-                elif vehicle_response_enum == data_model.VehicleResponse.INFORMATION:
-                    expected_value = "TTC @ t_information"
-
             # Add OEM Prediction and Value at the end
             row["OEM Prediction"] = str(point.color.value).capitalize()
             row["Value"] = float("nan")
@@ -1475,14 +1563,6 @@ def preprocess_stage_subelement(
                 and str(point.attributes["Function"]).upper() == "FCW"
             ):
                 expected_value = "fcw_ttc"
-
-            if is_dooring:
-                if vehicle_response_enum == data_model.VehicleResponse.RETENTION:
-                    expected_value = "TTC @ t_door_opening"
-                elif vehicle_response_enum == data_model.VehicleResponse.WARNING:
-                    expected_value = "TTC @ t_warning"
-                elif vehicle_response_enum == data_model.VehicleResponse.INFORMATION:
-                    expected_value = "TTC @ t_information"
 
             if is_road_edge and extended_range_performance == "ldw":
                 expected_value = "DTLE @ T_LDW"
@@ -1972,6 +2052,63 @@ def _compute_cpmfc_color(v_impact, v_impact_baseline):
     )
 
 
+def _resolve_dooring_type_of_system(test_point, vehicle_response_enum, row_key):
+    """The dooring function that acted on this row: the row's "Type of system"
+    cell (filled downstream by the evaluation tool from the measured dooring KPI;
+    this package never writes it), falling back to
+    the workbook-level "Vehicle response" (with a warning) when the cell is
+    blank or unreadable. A blank cell is simply an absent attribute
+    (read_test_points drops NaN values)."""
+    raw = test_point.attributes.get(TYPE_OF_SYSTEM_COLUMN)
+    if not _is_blank_attribute(raw):
+        try:
+            return data_model.VehicleResponse(str(raw).strip().capitalize())
+        except ValueError:
+            logger.warning(
+                "%s: unrecognised 'Type of system' %r; falling back to the "
+                "workbook Vehicle response %s",
+                row_key,
+                raw,
+                vehicle_response_enum,
+            )
+            return vehicle_response_enum
+    logger.warning(
+        "%s: 'Type of system' is blank; falling back to the workbook Vehicle "
+        "response %s",
+        row_key,
+        vehicle_response_enum,
+    )
+    return vehicle_response_enum
+
+
+def _resolve_dooring_door(test_point, row_key):
+    """The door this row was tested on, as one of the four values the tool
+    assigns. Missing or unrecognised (both only possible on a hand-edited
+    sheet) is scored as the driver's door -- the lower ceiling -- with a
+    warning. An unrecognised value must not be treated as "some other door":
+    that would lift the ceiling to the all-door band on the strength of a
+    typo."""
+    raw = test_point.attributes.get(DOOR_SELECTED_COLUMN)
+    if _is_blank_attribute(raw):
+        logger.warning(
+            "%s: 'Door selected' is missing; scoring as the driver's door",
+            row_key,
+        )
+        return DRIVER_DOOR
+    door = str(raw).strip()
+    for known in data_model.ALL_DOORS:
+        if door.lower() == known.lower():
+            return known
+    logger.warning(
+        "%s: 'Door selected' is %r, which is not one of %s; scoring as the "
+        "driver's door",
+        row_key,
+        door,
+        ", ".join(data_model.ALL_DOORS),
+    )
+    return DRIVER_DOOR
+
+
 def compute_lsc_loadcase_score(
     loadcase_name,
     test_points_df_dict,
@@ -2033,13 +2170,7 @@ def compute_lsc_loadcase_score(
         )
         write_back_colors = True
 
-    color_score_map = {
-        common.PredictionColor.GREEN: 1.0,
-        common.PredictionColor.YELLOW: 0.75,
-        common.PredictionColor.ORANGE: 0.5,
-        common.PredictionColor.BROWN: 0.25,
-        common.PredictionColor.RED: 0.0,
-    }
+    color_score_map = data_model.LSC_COLOR_RANK
 
     standard_test_points = [
         tp
@@ -2098,7 +2229,13 @@ def compute_lsc_loadcase_score(
             continue
 
         if value is None:
-            # Value not specified: use OEM prediction color weight directly
+            # Value not specified: use OEM prediction color weight directly.
+            # CBDA deliberately shares this branch: a blank type *and* a
+            # blank value keep today's behaviour, scoring on the OEM
+            # prediction. The "missing TTC fails" rule in
+            # _get_dooring_color governs a value that reaches the colour
+            # logic, not an unfilled cell -- an unverified row scores its
+            # prediction here exactly as every other LSC scenario does.
             scaling = color_score_map.get(oem_color, 0.0)
             computed_color_dict[row_key] = oem_color
             logger.debug(
@@ -2127,9 +2264,18 @@ def compute_lsc_loadcase_score(
                 test_point=test_point,
                 value=round_half_up(value, 2),
             )
-            computed_color = computed_test_point.get_lsc_computed_color(
-                vehicle_response_enum
-            )
+            if loadcase_name == "CBDA":
+                # Per row: the dooring function recorded in "Type of system"
+                # and the door the tool assigned decide the pass band and the
+                # colour ceiling.
+                computed_color = computed_test_point.get_lsc_computed_color(
+                    _resolve_dooring_type_of_system(
+                        test_point, vehicle_response_enum, row_key
+                    ),
+                    _resolve_dooring_door(test_point, row_key),
+                )
+            else:
+                computed_color = computed_test_point.get_lsc_computed_color()
             computed_color_dict[row_key] = computed_color
             scaling = color_score_map.get(computed_color, 0.0)
             logger.debug(

@@ -17,7 +17,7 @@ parameters must be N/A). This module runs them on the *raw uploaded workbook*
 duplicate-row collapse) and returns every violation as a
 common.ConsistencyFinding instead of failing fast, so a consuming application can
 display all of them at once. The rule logic is shared with preprocess
-(test_info.DOORING_ALLOWED_COLORS, collect_lsc_consistency_violations,
+(test_info.is_dooring_color_allowed, collect_lsc_consistency_violations,
 collect_cpla_cbla_coherence_mismatches) -- only the reporting differs.
 
 Grey (unfilled) cells are never rule violations here: an empty required cell
@@ -75,8 +75,9 @@ def _capitalized(color) -> str:
 
 
 def _find_dooring_findings(dfs) -> list:
-    """LSC dooring (CBDA): predicted colours the "Vehicle response" input
-    parameter forbids (test_info.DOORING_ALLOWED_COLORS)."""
+    """LSC dooring (CBDA): predicted colours *better* than what the "Vehicle
+    response" input parameter can achieve (test_info.is_dooring_color_allowed:
+    a prediction may be equal to or worse than the claim, never better)."""
     if LSC_PED_CYC_SHEET not in dfs or INPUT_PARAMETERS_SHEET not in dfs:
         return []
     prediction_df = dfs[LSC_PED_CYC_SHEET]
@@ -104,8 +105,11 @@ def _find_dooring_findings(dfs) -> list:
         for tp in test_points
         if tp.color not in (common.PredictionColor.GREY, common.PredictionColor.RED)
     ]
-    allowed = test_info.DOORING_ALLOWED_COLORS[vehicle_response]
-    allowed_desc = ", ".join(_capitalized(c) for c in allowed)
+    allowed = test_info.dooring_allowed_colors(vehicle_response)
+    # Red never reaches the check (filtered above), so don't advertise it.
+    allowed_desc = ", ".join(
+        _capitalized(c) for c in allowed if c != common.PredictionColor.RED
+    )
 
     findings = []
     for tp in test_info.collect_lsc_consistency_violations(

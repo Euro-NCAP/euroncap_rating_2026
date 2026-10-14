@@ -202,7 +202,9 @@ def generate_occupant_presence_df(input_parameters_df: pd.DataFrame) -> pd.DataF
     rows = [header_row] + child_left_behind_rows + child_enters_rows + crash_rows
     occupant_presence_df = pd.DataFrame(rows)
     occupant_presence_df = common.opposite_ffill(
-        occupant_presence_df, exclude_columns=["Element", "Value"]
+        occupant_presence_df,
+        exclude_columns=["Element", "Value"],
+        group_column="Category",
     )
     return occupant_presence_df
 
@@ -252,12 +254,12 @@ def compute_classification_score(
     # empty string, not NaN/pd.NA -- .ffill() only propagates over actual
     # nulls, so normalize is_empty_cell()-blank values to NaN first or a
     # caller-supplied empty string here silently blocks the whole reconstruction.
+    # "Element" is filled only within its Category, so the last child
+    # presence Element never lands on the Crash occupancy rows.
     ffill_columns = [c for c in om_df.columns if c not in ("Value", "Score")]
-    om_df[ffill_columns] = (
-        om_df[ffill_columns]
-        .map(lambda v: pd.NA if common.is_empty_cell(v) else v)
-        .ffill()
-    )
+    labels = om_df[ffill_columns].map(lambda v: pd.NA if common.is_empty_cell(v) else v)
+    om_df[ffill_columns] = labels.ffill()
+    om_df["Element"] = labels["Element"].groupby(om_df["Category"]).ffill()
 
     if any_child_general_req_blank:
         presence_score_dict["Child left behind"] = np.nan
@@ -414,5 +416,7 @@ def compute_classification_score(
 
     logger.info(f"presence_score_dict:\n{presence_score_dict}")
 
-    om_df = common.opposite_ffill(om_df, exclude_columns=["Value"])
+    om_df = common.opposite_ffill(
+        om_df, exclude_columns=["Value", "Score"], group_column="Category"
+    )
     return om_df, presence_score_dict

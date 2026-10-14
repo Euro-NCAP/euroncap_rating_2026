@@ -100,7 +100,8 @@ class TestLscConsistencyRaisesCleanlyOnRealMismatch(unittest.TestCase):
     exception handling is wired up; it never runs the real LSC consistency
     check (test_info.check_lsc_consistency). This exercises the actual CBDA
     dooring mismatch end to end -- Vehicle response=Warning with a Green
-    dooring point, which DOORING_ALLOWED_COLORS forbids -- on both entry
+    dooring point, which the equal-or-worse rule forbids (a Warning system
+    tops out at Yellow) -- on both entry
     points: the CLI (`crash_avoidance preprocess`) and the
     dataframe-in/dataframe-out sibling add_verification_sheets_to_dfs
     (called directly by non-CLI callers; a generic except-Exception wrapper

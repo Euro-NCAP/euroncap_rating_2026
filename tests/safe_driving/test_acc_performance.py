@@ -507,6 +507,48 @@ class TestMatrixScoring(unittest.TestCase):
         )
         self.assertEqual(score_dict[scenario], possible_score)
 
+    def test_braking_rows_score_against_the_vut_speed(self):
+        """The CCRb / CMRb template rows (VUT 55 km/h, Target 50 km/h): the
+        target brakes to a standstill, so full avoidance means the VUT is at a
+        standstill within the 2 km/h tolerance -- v_reduction > 53. Realistic
+        scenarios: 54.964 is a full-avoidance run that must stay Green; 27.742
+        is a run where the AEB took over at 27 km/h, which the old 3 km/h bar
+        scored Green and must be Orange."""
+        cases = (
+            (54.964, "possible", "Green"),
+            (53.010, "possible", "Green"),
+            (53.0, "half", "Orange"),
+            (27.742, "half", "Orange"),
+            (15.0, "zero", "Red"),
+        )
+        for scenario in ("CCRb", "CMRb"):
+            possible_score, half_score = self._expected_possible_scores(scenario)
+            expected_scores = {
+                "possible": possible_score,
+                "half": half_score,
+                "zero": 0,
+            }
+            for value, band, color in cases:
+                with self.subTest(scenario=scenario, value=value):
+                    result_df, score_dict = acc_performance.compute_score(
+                        {
+                            "VA - ACC verif.": self._build_acc_verification_df(
+                                {
+                                    "Scenario": scenario,
+                                    "VUT speed": "55 km/h",
+                                    "Target speed": "50 km/h",
+                                    "OEM Prediction": "Green",
+                                    "Value": value,
+                                }
+                            )
+                        }
+                    )
+                    self.assertEqual(score_dict[scenario], expected_scores[band])
+                    self.assertEqual(result_df.loc[8, "Score"], expected_scores[band])
+                    self.assertEqual(
+                        result_df.loc[8, self._color_col(result_df)], color
+                    )
+
     def test_green_above_threshold_with_nonzero_target_full_score(self):
         """v_reduction > v_scenario - v_target - 2 earns full score."""
         scenario = "CCRs straight"
@@ -591,6 +633,17 @@ class TestMatrixScoring(unittest.TestCase):
 
         self.assertEqual(score_dict[scenario], possible_score)
         self.assertEqual(result_df.loc[8, "Score"], possible_score)
+
+    def test_matrix_row_without_oem_prediction_column_fails_loudly(self):
+        """A matrix row whose OEM Prediction cannot be read must raise, not
+        silently fall through to Red/0 on the Grey default."""
+        columns = ["Category", "Scenario", "VUT speed", "Target speed", "Value"]
+        acc_verif_df = pd.DataFrame(
+            [["", "CCRs straight", "60 km/h", "0 km/h", 60]], columns=columns
+        )
+
+        with self.assertRaisesRegex(ValueError, "OEM Prediction"):
+            acc_performance.compute_score({"VA - ACC verif.": acc_verif_df})
 
     def _color_col(self, result_df: pd.DataFrame) -> str:
         # "Color" is renamed to "" for output formatting; resolve it by
@@ -823,6 +876,24 @@ class TestGreenVReductionThreshold(unittest.TestCase):
         )
         self.assertEqual(
             acc_performance.get_green_v_reduction_threshold("CCR cut-out", 70, 0), 68
+        )
+
+    def test_braking_measures_against_the_vut_speed(self):
+        """CCRb / CMRb: the target brakes to a standstill and the VUT follows
+        it, so the speed to shed is the VUT's own. The template rows (VUT 55,
+        Target 50) give 53, not 55 - 50 - 2 = 3, which every run would clear.
+        The moving-target siblings (CCRm / CMRm) keep the standard criterion."""
+        self.assertEqual(
+            acc_performance.get_green_v_reduction_threshold("CCRb", 55, 50), 53
+        )
+        self.assertEqual(
+            acc_performance.get_green_v_reduction_threshold("CMRb", 55, 50), 53
+        )
+        self.assertEqual(
+            acc_performance.get_green_v_reduction_threshold("CCRm", 70, 20), 48
+        )
+        self.assertEqual(
+            acc_performance.get_green_v_reduction_threshold("CMRm", 70, 20), 48
         )
 
     def test_cut_in_keeps_the_standard_criterion(self):

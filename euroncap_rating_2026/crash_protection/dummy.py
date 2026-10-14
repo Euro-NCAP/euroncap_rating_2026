@@ -18,6 +18,60 @@ logger = logging.getLogger(__name__)
 
 _BIORID_COUPLED_CAPPING_CRITERIA = frozenset({"T-HRC start", "T1 acceleration"})
 
+# Side pole only: a peak head Ares above the capping value together with a low
+# HIC15 is taken as arm-to-head contact, not head-to-pole contact, and does not
+# cap the dummy. The threshold is not in any protocol document yet and is still
+# unconfirmed, so it lives here as a single named value.
+POLE_ARES_CAPPING_HIC15_GATE = 500.0
+_POLE_LOADCASE_NAME = "Pole-32"
+
+NON_USE_POSITION = "Non-Use position"
+_NON_USE_PASS_WORDS = frozenset({"pass", "passed", "ok", "yes", "true"})
+_NON_USE_FAIL_WORDS = frozenset({"fail", "failed", "no", "false"})
+# The criteria sheets encode a pass/fail flag as 1000 / 0 (never 1).
+_NON_USE_PASS_NUMBER = 1000.0
+_NON_USE_FAIL_NUMBER = 0.0
+
+
+def parse_non_use_position(value):
+    """Read the Static-Rear "Non-Use position" assessment: True (pass),
+    False (fail) or None (not assessed). Accepts the inspector's PASS/FAIL
+    words (case-insensitive, plus the usual synonyms) and the sheet
+    encoding 1000 = pass / 0 = fail. Blank, NaN and N/A mean not assessed.
+    Anything else is logged and treated as not assessed -- never as a pass,
+    and this never raises, so a stray value can neither abort scoring nor
+    hand out credit for an assessment that did not happen."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("", "n/a", "nan", "none", "-"):
+            return None
+        if text in _NON_USE_PASS_WORDS:
+            return True
+        if text in _NON_USE_FAIL_WORDS:
+            return False
+        try:
+            value = float(text)
+        except ValueError:
+            logger.warning(
+                f"Unrecognised '{NON_USE_POSITION}' value {value!r}; "
+                "treating it as not assessed."
+            )
+            return None
+    if isinstance(value, (int, float, np.integer, np.floating)) and not isinstance(
+        value, bool
+    ):
+        if float(value) == _NON_USE_PASS_NUMBER:
+            return True
+        if float(value) == _NON_USE_FAIL_NUMBER:
+            return False
+    logger.warning(
+        f"Unrecognised '{NON_USE_POSITION}' value {value!r}; "
+        "treating it as not assessed."
+    )
+    return None
+
 
 class Dummy(BaseModel):
     """
@@ -40,6 +94,9 @@ class Dummy(BaseModel):
     max_score: Optional[float] = None
     score: Optional[float] = None
     capping: Optional[bool] = None
+    # Static-Rear only: the "Non-Use position" assessment (True = pass,
+    # False = fail, None = not assessed). A scoring input, not a modifier.
+    non_use_position: Optional[bool] = None
 
     @field_validator("score", mode="before")
     @classmethod
@@ -207,7 +264,7 @@ class Dummy(BaseModel):
         )
 
     @staticmethod
-    def get_dummy_from_row(dummy_name, df, row_index):
+    def get_dummy_from_row(dummy_name, df, row_index, load_case_name=None):
         """
          This function processes a DataFrame row by row to construct a Dummy object
         based on the provided model description. It validates the input data, extracts
@@ -215,6 +272,9 @@ class Dummy(BaseModel):
             dummy_name (str): The name of the dummy to be created.
             df (pd.DataFrame): The DataFrame containing the data for the dummy.
             row_index (int): The starting index of the row in the DataFrame.
+            load_case_name (str, optional): The name of the load case the dummy
+                belongs to. Only used for the load-case specific rules; when it
+                is not given those rules do not apply.
             Dummy: The created Dummy object containing body regions and criteria.
             int: The updated row index after processing the rows for the dummy.
         Raises:
@@ -244,6 +304,7 @@ class Dummy(BaseModel):
         body_region_criteria_map = {}
         body_region_test_points_map = {}
         dummy_capping_for_contact = False
+        dummy_non_use_position = None
 
         for i in range(row_index, len(df)):
             if not pd.isna(df.iloc[i]["Dummy"]) and i != row_index:
@@ -361,6 +422,18 @@ class Dummy(BaseModel):
                     )
                     row_index += 1
                     continue
+                if criteria_name == NON_USE_POSITION:
+                    # A pass/fail scoring input on the Static-Rear seat rows,
+                    # not a measurement: it never becomes a Measurement (no
+                    # rule exists for it there) and is read by the Static-Rear
+                    # score computation from the dummy instead.
+                    dummy_non_use_position = parse_non_use_position(row["Value"])
+                    logger.debug(
+                        f"{NON_USE_POSITION} at row {row_index}: {row['Value']!r} "
+                        f"-> {dummy_non_use_position}"
+                    )
+                    row_index += 1
+                    continue
                 measurement_value = None if pd.isna(row["Value"]) else row["Value"]
                 measurement = Measurement(name=criteria_name, value=measurement_value)
                 body_region_state[body_region_name]["measurements"].append(measurement)
@@ -443,7 +516,16 @@ class Dummy(BaseModel):
                             criteria.score = None
                             if criteria.capping_value:
                                 if criteria.value >= criteria.capping_value:
-                                    criteria.capping = True
+                                    # In the pole test a peak Ares with a low
+                                    # HIC15 comes from the arm hitting the head
+                                    # and must not cap. A missing HIC15 is not a
+                                    # low one, so it keeps the capping.
+                                    criteria.capping = not (
+                                        load_case_name == _POLE_LOADCASE_NAME
+                                        and head_hic15_value is not None
+                                        and head_hic15_value
+                                        < POLE_ARES_CAPPING_HIC15_GATE
+                                    )
                                 else:
                                     criteria.capping = False
                         elif criteria.name == "HIC15":
@@ -453,7 +535,11 @@ class Dummy(BaseModel):
                             criteria.depends_on = None
                             criteria.set_value(head_ares3ms_value)
 
-        dummy = Dummy(name=dummy_name, body_region_list=body_region_list)
+        dummy = Dummy(
+            name=dummy_name,
+            body_region_list=body_region_list,
+            non_use_position=dummy_non_use_position,
+        )
         dummy.set_capping(dummy_capping_for_contact)
         dummy.apply_coupled_color_rule()
         return (

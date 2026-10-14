@@ -10,6 +10,7 @@ import numpy as np
 from unittest.mock import patch, MagicMock
 from euroncap_rating_2026.safe_driving import occupant_presence
 from euroncap_rating_2026.safe_driving import data_model
+from euroncap_rating_2026 import common
 
 
 class TestComputeClassificationScoreBasic(unittest.TestCase):
@@ -527,6 +528,126 @@ class TestChildPresenceNotApplicable(unittest.TestCase):
 
         self.assertEqual(score_dict["Child left behind"], 0.0)
         self.assertEqual(score_dict["Child enters unlocked vehicle"], 0.0)
+
+
+class TestCrashOccupancyLabelsWithoutChildPresence(unittest.TestCase):
+    """Without a child presence system, the child presence General
+    requirements row sits directly above the Crash occupancy information
+    General requirements row. Both labels must survive, so a sheet filled by
+    (Category, Scenario) label still reaches the crash occupancy rows."""
+
+    def _input_params(self):
+        return pd.DataFrame(
+            {
+                "Scenario": [
+                    "Child left behind",
+                    None,
+                    "Child enters unlocked vehicle",
+                    None,
+                ],
+                "Input parameter": ["Type of system", "Seat coverage"] * 2,
+                "Value": ["N/A"] * 4,
+            }
+        )
+
+    def _fill_by_label(self, om_df, values):
+        # Category is written once per section: carry it down its section,
+        # but never carry a Scenario across rows.
+        category = om_df["Category"].replace("", np.nan).ffill()
+        om_df["Value"] = om_df["Value"].astype(object)
+        for (cat, scenario), value in values.items():
+            mask = (category == cat) & (om_df["Scenario"] == scenario)
+            self.assertEqual(mask.sum(), 1, f"no single row for {cat}/{scenario}")
+            om_df.loc[mask, "Value"] = value
+        return om_df
+
+    def _crash_scenarios(self, om_df):
+        category = om_df["Category"].replace("", np.nan).ffill()
+        scenarios = om_df.loc[category == "Crash occupancy information", "Scenario"]
+        return [str(s) for s in scenarios]
+
+    def test_crash_occupancy_general_requirements_kept_without_cpd(self):
+        input_params = self._input_params()
+        om_df = occupant_presence.preprocess({"Input parameters": input_params})
+
+        self.assertEqual(
+            self._crash_scenarios(om_df),
+            ["General requirements", "Adult occupants", "Children in all CRS"],
+        )
+
+        om_df = self._fill_by_label(
+            om_df,
+            {
+                ("Child presence detection", "General requirements"): "PASS",
+                ("Crash occupancy information", "General requirements"): "PASS",
+                ("Crash occupancy information", "Adult occupants"): "PASS",
+                ("Crash occupancy information", "Children in all CRS"): "FAIL",
+            },
+        )
+        result_df, score_dict = occupant_presence.compute_classification_score(
+            {"Input parameters": input_params, "OM - Occ. presence verif.": om_df}
+        )
+
+        self.assertEqual(score_dict["Adult occupants"], 4.0)
+        self.assertEqual(score_dict["Children in all CRS"], 0.0)
+        self.assertEqual(self._crash_scenarios(result_df)[0], "General requirements")
+
+    def test_both_crash_occupancy_fails_keep_zero_scores_in_report(self):
+        input_params = self._input_params()
+        om_df = occupant_presence.preprocess({"Input parameters": input_params})
+        om_df = self._fill_by_label(
+            om_df,
+            {
+                ("Child presence detection", "General requirements"): "PASS",
+                ("Crash occupancy information", "General requirements"): "PASS",
+                ("Crash occupancy information", "Adult occupants"): "FAIL",
+                ("Crash occupancy information", "Children in all CRS"): "FAIL",
+            },
+        )
+        result_df, _ = occupant_presence.compute_classification_score(
+            {"Input parameters": input_params, "OM - Occ. presence verif.": om_df}
+        )
+
+        scores = result_df.set_index("Scenario")["Score"]
+        self.assertEqual(scores["Adult occupants"], 0.0)
+        self.assertEqual(scores["Children in all CRS"], 0.0)
+
+
+class TestLabelsRoundTripWithChildPresence(unittest.TestCase):
+    """With a child presence system fitted, the scored sheet must carry the
+    same Category/Scenario/Element labels as the preprocessed sheet, so no
+    child presence Element leaks onto the Crash occupancy rows."""
+
+    def test_labels_match_preprocessed_sheet(self):
+        input_params = pd.DataFrame(
+            {
+                "Scenario": [
+                    "Child left behind",
+                    None,
+                    "Child enters unlocked vehicle",
+                    None,
+                ],
+                "Input parameter": ["Type of system", "Seat coverage"] * 2,
+                "Value": ["Warning and intervention", "All seats"] * 2,
+            }
+        )
+        om_df = occupant_presence.preprocess({"Input parameters": input_params})
+        om_df["Value"] = "PASS"
+
+        result_df, _ = occupant_presence.compute_classification_score(
+            {
+                "Input parameters": input_params,
+                "OM - Occ. presence verif.": om_df.copy(),
+            }
+        )
+
+        def labels(df):
+            return [
+                ["" if common.is_empty_cell(v) else str(v) for v in row]
+                for row in df[["Category", "Scenario", "Element"]].values
+            ]
+
+        self.assertEqual(labels(result_df), labels(om_df))
 
 
 if __name__ == "__main__":

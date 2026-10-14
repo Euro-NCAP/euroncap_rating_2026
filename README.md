@@ -133,6 +133,12 @@ euroncap_rating_2026 post_crash preprocess -i pc_template.xlsx
 euroncap_rating_2026 post_crash compute-score -i pc_preprocessed_template.xlsx
 ```
 
+### Rating protocol
+
+A workbook generated for another rating programme records that protocol in its `Version` sheet (`Protocol` row). `euroncap_rating_2026` itself writes no such row: a workbook without it is a Euro NCAP 2026-2028 workbook, which is what this command line generates and scores. `preprocess`, `compute-score` and the `overall` roll-up refuse a file generated for another protocol, so a file cannot be scored with the wrong rules by mistake.
+
+Other rating programmes built on this package are provided as separate packages that register their protocol, Safe Driving master template and Speed Assistance profile at import time and ship their own command line. Installing such a package does not change how `euroncap_rating_2026` behaves.
+
 ### Example: Overall rating
 
 The overall rating combines the four domain reports. Place the `*_report.xlsx` files produced by the four `compute-score` runs in one directory and pass it with `-p`:

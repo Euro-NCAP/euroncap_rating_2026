@@ -200,7 +200,8 @@ class TestCrashAvoidanceDataClasses(unittest.TestCase):
         self.assertEqual(color, common.PredictionColor.ORANGE)
 
     def test_get_lsc_computed_color_cbda_warning_yellow_returns_yellow(self):
-        """Test CBDA warning response preserves yellow matrix cells."""
+        """Test CBDA warning response preserves yellow matrix cells. Yellow is the
+        all-door claim, so the row is verified on a door other than the driver's."""
         dooring_ctp = matrix_processing.ComputedTestPoint(
             test_name="CBDA",
             test_point=matrix_processing.TestPoint(
@@ -214,11 +215,15 @@ class TestCrashAvoidanceDataClasses(unittest.TestCase):
             prediction_result=None,
         )
 
-        color = dooring_ctp.get_lsc_computed_color(data_model.VehicleResponse.WARNING)
+        color = dooring_ctp.get_lsc_computed_color(
+            data_model.VehicleResponse.WARNING, "Passenger"
+        )
         self.assertEqual(color, common.PredictionColor.YELLOW)
 
     def test_get_lsc_computed_color_cbda_retention_green_returns_green(self):
-        """Test CBDA retention returns green when value passes and prediction is green."""
+        """Test CBDA retention returns green when value passes and prediction is
+        green. Green is the all-door claim, so the row is verified on a door
+        other than the driver's."""
         dooring_ctp = matrix_processing.ComputedTestPoint(
             test_name="CBDA",
             test_point=matrix_processing.TestPoint(
@@ -232,7 +237,9 @@ class TestCrashAvoidanceDataClasses(unittest.TestCase):
             prediction_result=None,
         )
 
-        color = dooring_ctp.get_lsc_computed_color(data_model.VehicleResponse.RETENTION)
+        color = dooring_ctp.get_lsc_computed_color(
+            data_model.VehicleResponse.RETENTION, "Passenger"
+        )
         self.assertEqual(color, common.PredictionColor.GREEN)
 
     def test_get_lsc_computed_color_cbda_retention_yellow_returns_yellow(self):
@@ -309,13 +316,22 @@ class TestCbdaHandling(unittest.TestCase):
             }
         )
 
-    def _make_cbda_points_df(self, predicted_color, value):
+    def _implied_door(self, vehicle_response, color):
+        """The door preprocess assigns to a consistent (claim, colour) pair: the
+        two all-door claims are verified on a non-driver door, everything else
+        on the driver's."""
+        if (vehicle_response, color) in test_info.DOORING_ALL_DOOR_CLAIMS:
+            return "Passenger"
+        return test_info.DRIVER_DOOR
+
+    def _make_cbda_points_df(self, predicted_color, value, door="Driver"):
         return pd.DataFrame(
             {
                 "Scenario": ["CBDA"],
                 "Test point": ["(0, 0)"],
                 "Range": [matrix_processing.TestRange.STANDARD.value],
                 "OEM Prediction": [predicted_color.value],
+                "Door selected": [door],
                 "Value": [value],
             }
         )
@@ -331,66 +347,100 @@ class TestCbdaHandling(unittest.TestCase):
             for i in range(n)
         ]
 
-    def _make_cbda_retention_points_df(self, predicted_color, value):
+    def _make_cbda_retention_points_df(self, predicted_color, value, door="Driver"):
         return pd.DataFrame(
             {
                 "Scenario": ["CBDA"],
                 "Test point": ["(0, 0)"],
                 "Range": [matrix_processing.TestRange.STANDARD.value],
                 "OEM Prediction": [predicted_color.value],
-                "Expected value": ["TTC @ t_door_opening"],
+                "Expected value": ["TTC"],
+                "Door selected": [door],
                 "Value": [value],
             }
         )
 
-    def test_cbda_information_consistency_requires_brown(self):
-        passing_points = [self._make_cbda_test_point(common.PredictionColor.BROWN)]
-        failing_points = [self._make_cbda_test_point(common.PredictionColor.YELLOW)]
+    def _assert_consistency(self, vehicle_response, allowed, rejected):
+        """The CBDA rule is equal-or-worse: a predicted colour passes when it is
+        no better than the best colour the claimed Vehicle response can reach
+        (Information -> Brown, Warning -> Yellow, Retention -> Green)."""
+        for color in allowed:
+            with self.subTest(response=vehicle_response, color=color, expect="allowed"):
+                self.assertTrue(
+                    test_info.check_lsc_consistency(
+                        [self._make_cbda_test_point(color)], vehicle_response
+                    )
+                )
+        for color in rejected:
+            with self.subTest(
+                response=vehicle_response, color=color, expect="rejected"
+            ):
+                self.assertFalse(
+                    test_info.check_lsc_consistency(
+                        [self._make_cbda_test_point(color)], vehicle_response
+                    )
+                )
 
-        self.assertTrue(
-            test_info.check_lsc_consistency(
-                passing_points, data_model.VehicleResponse.INFORMATION
-            )
-        )
-        self.assertFalse(
-            test_info.check_lsc_consistency(
-                failing_points, data_model.VehicleResponse.INFORMATION
-            )
-        )
-
-    def test_cbda_warning_consistency_requires_orange_or_yellow(self):
-        passing_points = [
-            self._make_cbda_test_point(common.PredictionColor.ORANGE),
-            self._make_cbda_test_point(common.PredictionColor.YELLOW),
-        ]
-        failing_points = [self._make_cbda_test_point(common.PredictionColor.BROWN)]
-
-        self.assertTrue(
-            test_info.check_lsc_consistency(
-                passing_points, data_model.VehicleResponse.WARNING
-            )
-        )
-        self.assertFalse(
-            test_info.check_lsc_consistency(
-                failing_points, data_model.VehicleResponse.WARNING
-            )
+    def test_cbda_information_consistency_allows_brown_or_worse(self):
+        self._assert_consistency(
+            data_model.VehicleResponse.INFORMATION,
+            allowed=[common.PredictionColor.BROWN, common.PredictionColor.RED],
+            rejected=[
+                common.PredictionColor.ORANGE,
+                common.PredictionColor.YELLOW,
+                common.PredictionColor.GREEN,
+            ],
         )
 
-    def test_cbda_retention_consistency_requires_green_or_yellow(self):
-        passing_points = [
+    def test_cbda_warning_consistency_allows_yellow_or_worse(self):
+        self._assert_consistency(
+            data_model.VehicleResponse.WARNING,
+            allowed=[
+                common.PredictionColor.YELLOW,
+                common.PredictionColor.ORANGE,
+                common.PredictionColor.BROWN,
+                common.PredictionColor.RED,
+            ],
+            rejected=[common.PredictionColor.GREEN],
+        )
+
+    def test_cbda_retention_consistency_allows_every_colour(self):
+        # Green is the best a Retention system can reach, so no prediction is
+        # ever better than the claim.
+        self._assert_consistency(
+            data_model.VehicleResponse.RETENTION,
+            allowed=[
+                common.PredictionColor.GREEN,
+                common.PredictionColor.YELLOW,
+                common.PredictionColor.ORANGE,
+                common.PredictionColor.BROWN,
+                common.PredictionColor.RED,
+            ],
+            rejected=[],
+        )
+
+    def test_cbda_consistency_flags_only_the_better_than_claim_cells(self):
+        # A mixed matrix: only the Green cell is better than a Warning claim.
+        points = [
             self._make_cbda_test_point(common.PredictionColor.GREEN),
             self._make_cbda_test_point(common.PredictionColor.YELLOW),
+            self._make_cbda_test_point(common.PredictionColor.BROWN),
         ]
-        failing_points = [self._make_cbda_test_point(common.PredictionColor.ORANGE)]
+        violations = test_info.collect_lsc_consistency_violations(
+            points, data_model.VehicleResponse.WARNING
+        )
+        self.assertEqual(
+            [tp.color for tp in violations], [common.PredictionColor.GREEN]
+        )
 
+    def test_cbda_consistency_skips_grey_cells(self):
+        points = [
+            self._make_cbda_test_point(common.PredictionColor.GREY),
+            self._make_cbda_test_point(common.PredictionColor.BROWN),
+        ]
         self.assertTrue(
             test_info.check_lsc_consistency(
-                passing_points, data_model.VehicleResponse.RETENTION
-            )
-        )
-        self.assertFalse(
-            test_info.check_lsc_consistency(
-                failing_points, data_model.VehicleResponse.RETENTION
+                points, data_model.VehicleResponse.INFORMATION
             )
         )
 
@@ -431,7 +481,16 @@ class TestCbdaHandling(unittest.TestCase):
                 loadcase_score, computed_color_dict = (
                     test_info.compute_lsc_loadcase_score(
                         "CBDA",
-                        {"CBDA": self._make_cbda_points_df(predicted_color, 2.0)},
+                        {
+                            "CBDA": self._make_cbda_points_df(
+                                predicted_color,
+                                2.0,
+                                door=self._implied_door(
+                                    data_model.VehicleResponse.WARNING,
+                                    predicted_color,
+                                ),
+                            )
+                        },
                         self._make_input_parameters_df(
                             data_model.VehicleResponse.WARNING
                         ),
@@ -444,21 +503,26 @@ class TestCbdaHandling(unittest.TestCase):
                 self.assertEqual(loadcase_score.total_score, expected_score)
                 self.assertEqual(computed_color_dict["CBDA_(0, 0)"], predicted_color)
 
-    def test_cbda_warning_scoring_uses_computed_color_when_value_specified(self):
-        # OEM=BROWN is inconsistent for WARNING (expects ORANGE/YELLOW), but when Value
-        # is specified the computed color (YELLOW, TTC=2.0≥1.70) determines the score.
+    def test_cbda_warning_scoring_is_capped_by_a_worse_prediction(self):
+        # OEM=BROWN under a WARNING claim is consistent (equal-or-worse), and the
+        # prediction caps the row: the TTC clears the Warning band, but the
+        # computed colour cannot rise above the predicted Brown.
         loadcase_score, computed_color_dict = test_info.compute_lsc_loadcase_score(
             "CBDA",
-            {"CBDA": self._make_cbda_points_df(common.PredictionColor.BROWN, 2.0)},
+            {
+                "CBDA": self._make_cbda_points_df(
+                    common.PredictionColor.BROWN, 2.0, door="Passenger"
+                )
+            },
             self._make_input_parameters_df(data_model.VehicleResponse.WARNING),
             self._make_standard_test_points(1),
             matrix_total_cells=1,
         )
 
-        self.assertAlmostEqual(loadcase_score.standard_score, 0.75 * 2.0, places=3)
-        self.assertAlmostEqual(loadcase_score.total_score, 0.75 * 2.0, places=3)
+        self.assertAlmostEqual(loadcase_score.standard_score, 0.25 * 2.0, places=3)
+        self.assertAlmostEqual(loadcase_score.total_score, 0.25 * 2.0, places=3)
         self.assertEqual(
-            computed_color_dict["CBDA_(0, 0)"], common.PredictionColor.YELLOW
+            computed_color_dict["CBDA_(0, 0)"], common.PredictionColor.BROWN
         )
 
     def test_cbda_retention_scoring_distinguishes_green_and_yellow(self):
@@ -474,7 +538,12 @@ class TestCbdaHandling(unittest.TestCase):
                         "CBDA",
                         {
                             "CBDA": self._make_cbda_retention_points_df(
-                                predicted_color, 2.0
+                                predicted_color,
+                                2.0,
+                                door=self._implied_door(
+                                    data_model.VehicleResponse.RETENTION,
+                                    predicted_color,
+                                ),
                             )
                         },
                         self._make_input_parameters_df(
@@ -579,77 +648,27 @@ class TestCbdaHandling(unittest.TestCase):
 
 
 class TestLoadcaseSelectionBoundaries(unittest.TestCase):
-    def test_ccrb_target_speed_threshold_keeps_80_and_excludes_81(self):
-        test_points = [
-            matrix_processing.TestPoint(
-                row=0,
-                col=0,
-                color=common.PredictionColor.GREEN,
-                test_range=matrix_processing.TestRange.STANDARD,
-                attributes={"Target speed": "79 km/h"},
-            ),
-            matrix_processing.TestPoint(
-                row=0,
-                col=1,
-                color=common.PredictionColor.GREEN,
-                test_range=matrix_processing.TestRange.STANDARD,
-                attributes={"Target speed": "80 km/h"},
-            ),
-            matrix_processing.TestPoint(
-                row=0,
-                col=2,
-                color=common.PredictionColor.GREEN,
-                test_range=matrix_processing.TestRange.STANDARD,
-                attributes={"Target speed": "81 km/h"},
-            ),
-        ]
-        loadcase_info = test_info.LoadcaseInfo(
-            test_name="CCRb",
-            test_points=test_points,
-            robustness_layers={},
-            num_extended_tests=0,
-            num_robustness_tests=0,
-        )
+    # --- CCRb (Target speed <= 100; FC v1.2 4.1.3 "GVT speed >100 km/h" is the
+    # Corner Case, so the 90/100 km/h rows stay in the lab pool) ---
 
-        selection = loadcase_info.select_test_points()
-
-        selected_target_speeds = {
-            test_point.attributes["Target speed"]
-            for test_point in selection.standard_points
-        }
-
-        self.assertEqual(selected_target_speeds, {"79 km/h", "80 km/h"})
-        self.assertNotIn("81 km/h", selected_target_speeds)
+    def test_ccrb_target_speed_threshold_keeps_100_and_excludes_101(self):
+        info = self._make_loadcase_info("CCRb", "Target speed", [99, 100, 101])
+        selection = info.select_test_points()
+        speeds = self._selected_speeds(selection, "Target speed")
+        self.assertEqual(speeds, {"99 km/h", "100 km/h"})
+        self.assertNotIn("101 km/h", speeds)
         self.assertEqual(selection.extended_points, [])
         self.assertIsNone(selection.selected_robustness_layer)
 
+    def test_ccrb_90_and_100_are_not_corner_cases(self):
+        info = self._make_loadcase_info("CCRb", "Target speed", [80, 90, 100])
+        selection = info.select_test_points()
+        speeds = self._selected_speeds(selection, "Target speed")
+        self.assertEqual(speeds, {"80 km/h", "90 km/h", "100 km/h"})
+
     def test_ccrb_all_above_threshold_selects_no_points(self):
-        test_points = [
-            matrix_processing.TestPoint(
-                row=0,
-                col=0,
-                color=common.PredictionColor.GREEN,
-                test_range=matrix_processing.TestRange.STANDARD,
-                attributes={"Target speed": "81 km/h"},
-            ),
-            matrix_processing.TestPoint(
-                row=0,
-                col=1,
-                color=common.PredictionColor.GREEN,
-                test_range=matrix_processing.TestRange.STANDARD,
-                attributes={"Target speed": "90 km/h"},
-            ),
-        ]
-        loadcase_info = test_info.LoadcaseInfo(
-            test_name="CCRb",
-            test_points=test_points,
-            robustness_layers={},
-            num_extended_tests=0,
-            num_robustness_tests=0,
-        )
-
-        selection = loadcase_info.select_test_points()
-
+        info = self._make_loadcase_info("CCRb", "Target speed", [101, 110])
+        selection = info.select_test_points()
         self.assertEqual(selection.standard_points, [])
         self.assertEqual(selection.extended_points, [])
         self.assertIsNone(selection.selected_robustness_layer)
@@ -917,6 +936,64 @@ class TestLoadcaseSelectionBoundaries(unittest.TestCase):
         selection = info.select_test_points()
         self.assertEqual(selection.standard_points, [])
 
+    # --- CC ELK On/OvU/OvI (Target speed <= 100). LDC v1.2 4.1.3 prints the
+    # overtaking clause for CM ELK only; Euro NCAP confirmed that is a typo and
+    # the CCRb threshold (GVT speed >100 km/h) applies to CC ELK too. Only
+    # CC ELK OvU has cells above 100 in the template. ---
+
+    def test_cc_elk_keeps_100_and_excludes_101(self):
+        for test_name in ("CC ELK On", "CC ELK OvU", "CC ELK OvI"):
+            with self.subTest(test=test_name):
+                info = self._make_loadcase_info(
+                    test_name, "Target speed", [99, 100, 101]
+                )
+                selection = info.select_test_points()
+                speeds = self._selected_speeds(selection, "Target speed")
+                self.assertEqual(speeds, {"99 km/h", "100 km/h"})
+
+    def test_cc_elk_all_above_threshold_selects_no_points(self):
+        info = self._make_loadcase_info("CC ELK OvU", "Target speed", [110, 140])
+        selection = info.select_test_points()
+        self.assertEqual(selection.standard_points, [])
+        self.assertEqual(selection.extended_points, [])
+
+    # --- LSC Car & PTW (LSC v1.2 4.1.2: CMFtap / CMCscp with target speed
+    # >60 km/h are Corner Cases) ---
+
+    def _lsc_selected_speeds(self, test_name, speeds):
+        info = self._make_loadcase_info(test_name, "Target speed", speeds)
+        for tp in info.test_points:
+            tp.attributes["VUT speed"] = "SfS"
+        selection = test_info.get_all_lsc_points(info)
+        self.assertEqual(selection.extended_points, [])
+        return self._selected_speeds(selection, "Target speed")
+
+    def test_lsc_cmcscp_sfs_excludes_70_and_80(self):
+        speeds = self._lsc_selected_speeds("CMCscp SfS", [20, 30, 40, 50, 60, 70, 80])
+        self.assertEqual(
+            speeds, {"20 km/h", "30 km/h", "40 km/h", "50 km/h", "60 km/h"}
+        )
+
+    def test_lsc_cmftap_sfs_excludes_80(self):
+        speeds = self._lsc_selected_speeds("CMFtap SfS", [30, 45, 60, 80])
+        self.assertEqual(speeds, {"30 km/h", "45 km/h", "60 km/h"})
+
+    def test_lsc_car_scenarios_have_no_corner_cases(self):
+        self.assertEqual(
+            self._lsc_selected_speeds("CCCscp SfS", [20, 30, 40, 50, 60]),
+            {"20 km/h", "30 km/h", "40 km/h", "50 km/h", "60 km/h"},
+        )
+        self.assertEqual(
+            self._lsc_selected_speeds("CCFtap SfS", [30, 45, 60]),
+            {"30 km/h", "45 km/h", "60 km/h"},
+        )
+
+    def test_lsc_corner_case_still_dropped_when_red_or_grey_filter_passes(self):
+        info = self._make_loadcase_info("CMCscp SfS", "Target speed", [60, 70])
+        info.test_points[1].color = common.PredictionColor.YELLOW
+        selection = test_info.get_all_lsc_points(info)
+        self.assertEqual(self._selected_speeds(selection, "Target speed"), {"60 km/h"})
+
     def test_cc_elk_ovi_initial_position_offset_has_verification_condition(self):
         info = self._make_loadcase_info("CC ELK OvI", "Target speed", [79, 80])
         info.robustness_layers = {"Initial position offset": "YES"}
@@ -931,7 +1008,7 @@ class TestLoadcaseSelectionBoundaries(unittest.TestCase):
         )
         self.assertIn(
             selection.verification_condition,
-            {"0.25m away from VUT", "0.5m closer to VUT"},
+            {"0.25m away from VUT", "0.25m closer to VUT"},
         )
         self.assertEqual(
             selection.assessment_criteria,
@@ -949,6 +1026,69 @@ class TestLoadcaseSelectionBoundaries(unittest.TestCase):
             assessment_criteria,
             robustness_layer.AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED,
         )
+
+    def _elk_initial_position_selection(self, test_name):
+        """Draw the Initial position offset layer for *test_name* (Target speed
+        <= 80, the CM/CC ELK selectable band)."""
+        info = self._make_loadcase_info(test_name, "Target speed", [79, 80])
+        info.robustness_layers = {"Initial position offset": "YES"}
+        info.num_robustness_tests = 1
+        info.stage_subelement_key = data_model.StageSubelementKey.LDC
+        return info.select_test_points()
+
+    def test_cm_elk_on_initial_position_offset_has_verification_condition(self):
+        """The Initial position offset condition is a +/-0.25 m path offset for
+        PTW exactly as for Car (LDC v1.2 sec 5.2.4.1 "Car & PTW", Appendix B;
+        CA 002 v1.2 sec 2.1.2). It used to be the non-protocol token
+        "safety_margin_violation", which the lab could not run."""
+        selection = self._elk_initial_position_selection("CM ELK On")
+
+        self.assertEqual(
+            selection.selected_robustness_layer,
+            "Initial position offset",
+        )
+        self.assertIn(
+            selection.verification_condition,
+            {"0.25m away from VUT", "0.25m closer to VUT"},
+        )
+        self.assertEqual(
+            selection.assessment_criteria,
+            robustness_layer.AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED,
+        )
+
+    def test_cm_elk_ovi_initial_position_offset_has_verification_condition(self):
+        """CM ELK OvU/OvI resolve to the "CM ELK Ov" key through
+        _get_canonical_test_name, so the overtaking pair is covered too
+        (CA 002 v1.2 sec 2.1.4)."""
+        selection = self._elk_initial_position_selection("CM ELK OvI")
+
+        self.assertEqual(
+            selection.selected_robustness_layer,
+            "Initial position offset",
+        )
+        self.assertIn(
+            selection.verification_condition,
+            {"0.25m away from VUT", "0.25m closer to VUT"},
+        )
+        self.assertEqual(
+            selection.assessment_criteria,
+            robustness_layer.AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED,
+        )
+
+    def test_cm_elk_initial_position_offset_draws_both_sides(self):
+        """The entry must be a list, not a bare tuple: a tuple is returned as is
+        by get_robustness_layer_verification_condition, which is how the token
+        came out deterministically on every campaign."""
+        for test_name in ("CM ELK On", "CM ELK OvU", "CM ELK OvI"):
+            with self.subTest(test_name=test_name):
+                drawn = {
+                    robustness_layer.get_robustness_layer_verification_condition(
+                        robustness_layer.RobustnessLayer.INITIAL_POSITION_OFFSET,
+                        test_name,
+                    )[0]
+                    for _ in range(200)
+                }
+                self.assertEqual(drawn, {"0.25m away from VUT", "0.25m closer to VUT"})
 
     # --- ELK RE (VUT speed <= 80) ---
 
@@ -1960,13 +2100,13 @@ class TestPreprocessStageSubelementInputSelection(unittest.TestCase):
                     "Gap": "0.50 m",
                     "Target speed": "10 km/h",
                     "Door selected": "Driver",
-                    "Function": "Retention",
+                    "Type of system": "Retention",
                 },
                 {
                     "Gap": "1.00 m",
                     "Target speed": "15 km/h",
                     "Door selected": "Behind passenger",
-                    "Function": "Retention",
+                    "Type of system": "Retention",
                 },
             ]
         }
@@ -1986,11 +2126,18 @@ class TestPreprocessStageSubelementInputSelection(unittest.TestCase):
         ].reset_index(drop=True)
         # Now one row per selected point (no more duplicate rows)
         self.assertEqual(len(cbda_rows), len(input_selected_points["CBDA"]))
-        self.assertTrue((cbda_rows["Expected value"] == "TTC @ t_door_opening").all())
+        # The Expected value is the generic TTC now; which TTC the lab reports
+        # follows from the row's own "Type of system".
+        self.assertTrue((cbda_rows["Expected value"] == "TTC").all())
         self.assertCountEqual(
             cbda_rows["Door selected"].tolist(),
             ["Driver", "Behind passenger"],
         )
+        # "Type of system" replaces "Function" on CBDA rows and round-trips
+        # through the sheet exactly like "Door selected".
+        self.assertIn("Type of system", cbda_rows.columns)
+        self.assertTrue((cbda_rows["Type of system"] == "Retention").all())
+        self.assertNotIn("Function", cbda_rows.columns)
 
         # Standard reader handles all CBDA response types
         round_trip_points, computed_info_dict = test_info.read_test_points(cbda_rows)
@@ -1998,7 +2145,8 @@ class TestPreprocessStageSubelementInputSelection(unittest.TestCase):
         for test_point in round_trip_points:
             row_key = f"CBDA_({test_point.row}, {test_point.col})"
             self.assertIn("value", computed_info_dict[row_key])
-            self.assertEqual(test_point.attributes["Function"], "Retention")
+            self.assertEqual(test_point.attributes["Type of system"], "Retention")
+            self.assertNotIn("Function", test_point.attributes)
         self.assertCountEqual(
             [tp.attributes["Door selected"] for tp in round_trip_points],
             ["Driver", "Behind passenger"],
@@ -2643,6 +2791,117 @@ class TestApplyCrossScenarioRobustnessRule(unittest.TestCase):
         # LDC CCFtap is NOT reduced (different stage element)
         self.assertAlmostEqual(ccftap_ldc.robustness_layer_score, 0.4375)
         self.assertAlmostEqual(ccftap_ldc.total_score, 4.9375)
+
+
+class TestRobustnessVerificationConditionTable(unittest.TestCase):
+    """Guards on ROBUSTNESS_LAYER_TO_VERIFICATION_CONDITION as a whole. The
+    strings in this table are copied verbatim into the "Verification condition"
+    column the lab reads, so a placeholder that leaks in is not a cosmetic
+    problem: it makes the issued sheet unrunnable."""
+
+    ELK_INITIAL_POSITION_CONDITIONS = {
+        "0.25m away from VUT",
+        "0.25m closer to VUT",
+    }
+
+    def _condition_strings(self, entry):
+        """The condition strings of one table entry, which is either a single
+        (condition, criteria) tuple or a list of them."""
+        if isinstance(entry, list):
+            return [condition for condition, _ in entry]
+        return [entry[0]]
+
+    def test_all_four_elk_keys_carry_the_two_protocol_labels(self):
+        """Car and PTW share the +/-0.25 m path offset, and both sides must be
+        drawable, so all four ELK keys hold the same symmetric pair."""
+        table = robustness_layer.ROBUSTNESS_LAYER_TO_VERIFICATION_CONDITION[
+            robustness_layer.RobustnessLayer.INITIAL_POSITION_OFFSET
+        ]
+        for key in ("CC ELK On", "CC ELK Ov", "CM ELK On", "CM ELK Ov"):
+            with self.subTest(key=key):
+                self.assertIsInstance(table[key], list)
+                self.assertEqual(
+                    set(self._condition_strings(table[key])),
+                    self.ELK_INITIAL_POSITION_CONDITIONS,
+                )
+
+    def test_no_verification_condition_is_a_snake_case_token(self):
+        """Every condition in the table is protocol prose or notation
+        ("+0.5m Path offset", "-2 km/h", "Performance in darkness (1 lux)").
+        An underscore means a code token reached lab-facing text, which is what
+        "safety_margin_violation" was."""
+        offenders = []
+        for (
+            layer,
+            entries,
+        ) in robustness_layer.ROBUSTNESS_LAYER_TO_VERIFICATION_CONDITION.items():
+            for test_name, entry in entries.items():
+                for condition in self._condition_strings(entry):
+                    if "_" in condition:
+                        offenders.append((layer, test_name, condition))
+        self.assertEqual(offenders, [])
+
+    HEADING_SUFFIX = " (rotation around the impact point)"
+
+    def test_trajectory_heading_conditions_match_fc_v1_2(self):
+        """FC v1.2 sec 5.2.1.3 gives each scenario its own target rotations:
+        -10/+20 deg for CCRs, CMRs, CPNA, CPFA and CBNAO, only +20 deg for
+        CPNCO and CBNA, only -20 deg for CBFA. A symmetric +/-20 deg pair would
+        let a lab be issued a rotation the protocol does not list."""
+        expected = {
+            "CCRs": {"-10°", "+20°"},
+            "CMRs": {"-10°", "+20°"},
+            "CPNA": {"-10°", "+20°"},
+            "CPFA": {"-10°", "+20°"},
+            "CBNAO": {"-10°", "+20°"},
+            "CPNCO": {"+20°"},
+            "CBNA": {"+20°"},
+            "CBFA": {"-20°"},
+        }
+        table = robustness_layer.ROBUSTNESS_LAYER_TO_VERIFICATION_CONDITION[
+            robustness_layer.RobustnessLayer.TRAJECTORY_HEADING
+        ]
+        self.assertEqual(set(table), set(expected))
+        for test_name, angles in expected.items():
+            with self.subTest(test_name=test_name):
+                self.assertEqual(
+                    set(self._condition_strings(table[test_name])),
+                    {angle + self.HEADING_SUFFIX for angle in angles},
+                )
+
+    def test_cpna_heading_draw_never_minus_20(self):
+        """A pedestrian crossing from the nearside is rotated by -10 or +20
+        deg, so repeated draws give exactly those two and never -20 deg."""
+        drawn = {
+            robustness_layer.get_robustness_layer_verification_condition(
+                robustness_layer.RobustnessLayer.TRAJECTORY_HEADING, "CPNA"
+            )[0]
+            for _ in range(200)
+        }
+        self.assertEqual(
+            drawn, {"-10°" + self.HEADING_SUFFIX, "+20°" + self.HEADING_SUFFIX}
+        )
+
+    def test_previously_issued_heading_condition_keeps_its_scoring(self):
+        """A preprocessed file already carrying "-20 deg" on CPNA no longer
+        matches the table. The lookup then gives no criteria, which the
+        robustness assessment treats as "Same or better than predicted", the
+        criteria the heading layer always had, so its score does not change."""
+        self.assertIsNone(
+            robustness_layer.get_assessment_criteria(
+                robustness_layer.RobustnessLayer.TRAJECTORY_HEADING,
+                "CPNA",
+                "-20°" + self.HEADING_SUFFIX,
+            )
+        )
+        self.assertEqual(
+            robustness_layer.get_assessment_criteria(
+                robustness_layer.RobustnessLayer.TRAJECTORY_HEADING,
+                "CPNA",
+                "-10°" + self.HEADING_SUFFIX,
+            ),
+            robustness_layer.AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED,
+        )
 
 
 if __name__ == "__main__":

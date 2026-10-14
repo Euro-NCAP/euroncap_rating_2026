@@ -4,25 +4,26 @@
 # Licensed under the Apache License 2.0.
 # See http://www.apache.org/licenses/LICENSE-2.0 for details.
 
-"""Report-only legform symmetry collector for crash_protection
+"""Report-only prediction collector for crash_protection
 (consistency.find_prediction_inconsistencies) and its integration into
-integrity.find_consistency_findings."""
+integrity.find_consistency_findings. Asymmetric legform patterns are
+accepted: only no_prediction_provided is reported on the VRU sheet."""
 
 import unittest
 
 import openpyxl
 
 from euroncap_rating_2026 import common
-from euroncap_rating_2026.crash_protection import consistency, integrity, vru_processing
+from euroncap_rating_2026.crash_protection import consistency, integrity
 
 
-# Worksheet geometry of the legform matrix (see consistency._legform_cell):
+# Worksheet geometry of the legform matrix (see consistency._legform_row):
 # matrix rows 0..2 are worksheet rows 27..29, matrix column j is worksheet
 # column 5+j (E..Y, 21 positions).
 LEGFORM_WS_ROWS = (27, 28, 29)
 
 
-class TestLegformSymmetryFindings(unittest.TestCase):
+class TestLegformPredictionFindings(unittest.TestCase):
     def setUp(self):
         from importlib.resources import files
 
@@ -31,10 +32,8 @@ class TestLegformSymmetryFindings(unittest.TestCase):
         self.ws = self.wb["CP - VRU Prediction"]
 
     def test_pristine_template_has_no_findings(self):
-        # An untouched template has no legform_symmetry violations (nothing
-        # filled in to contradict), but it does trip
-        # no_prediction_provided for every section the missing-input check
-        # no longer covers: Headforms,
+        # An untouched template trips no_prediction_provided for every
+        # section the missing-input check does not cover: Headforms,
         # Pelvis Impact (Upper legform), and Leg Impact (both aPLI rows).
         findings = consistency.find_prediction_inconsistencies(self.wb)
 
@@ -53,13 +52,12 @@ class TestLegformSymmetryFindings(unittest.TestCase):
 
     def test_symmetric_pattern_is_clean(self):
         self.ws["E27"] = "T"
-        self.ws["Y27"] = "ST"  # mirror of E: T/ST both satisfy the T/ST rule
+        self.ws["Y27"] = "ST"
 
         findings = consistency.find_prediction_inconsistencies(self.wb)
 
-        # No symmetry violations from this pattern -- Pelvis Impact now has
-        # a prediction too, so only Leg Impact and Headforms (still
-        # untouched) trip no_prediction_provided.
+        # Pelvis Impact now has a prediction, so only Leg Impact and
+        # Headforms (still untouched) trip no_prediction_provided.
         self.assertEqual(
             {f.check for f in findings}, {common.CHECK_NO_PREDICTION_PROVIDED}
         )
@@ -68,25 +66,22 @@ class TestLegformSymmetryFindings(unittest.TestCase):
             {"Headforms", "aPLI - Femur / aPLI - Knee & Tibia (Leg Impact)"},
         )
 
-    def test_asymmetric_t_st_reported_with_cells(self):
-        self.ws["G28"] = "SA"  # mirror W28 left grey -> SA rule violated
-        self.ws["W28"] = "ST"  # its mirror is SA, not T/ST -> T/ST rule violated
+    def test_asymmetric_sa_st_is_accepted(self):
+        # SA at G28 mirrored by ST at W28: the retired symmetry rule flagged
+        # both cells; Euro NCAP accepts the pattern, so nothing may
+        # be reported for them.
+        self.ws["G28"] = "SA"
+        self.ws["W28"] = "ST"
 
         findings = consistency.find_prediction_inconsistencies(self.wb)
 
-        symmetry = [f for f in findings if f.check == common.CHECK_LEGFORM_SYMMETRY]
-        self.assertEqual({f.cell for f in symmetry}, {"G28", "W28"})
-        for f in symmetry:
-            self.assertEqual(f.sheet, "CP - VRU Prediction")
-            self.assertEqual(f.row_identity.get("Section"), "aPLI - Femur")
-
+        self.assertEqual(
+            {f.check for f in findings}, {common.CHECK_NO_PREDICTION_PROVIDED}
+        )
         # Leg Impact now has a prediction (G28/W28), so only Pelvis Impact
         # (still untouched) and Headforms trip no_prediction_provided.
-        no_prediction = [
-            f for f in findings if f.check == common.CHECK_NO_PREDICTION_PROVIDED
-        ]
         self.assertEqual(
-            {f.row_identity.get("Section") for f in no_prediction},
+            {f.row_identity.get("Section") for f in findings},
             {"Headforms", "Upper legform (Pelvis Impact)"},
         )
 
@@ -94,8 +89,9 @@ class TestLegformSymmetryFindings(unittest.TestCase):
         # Upper legform (worksheet row 27) belongs to Pelvis Impact; the two
         # aPLI rows (28/29) to Leg Impact. Consuming applications query the
         # two scopes separately and merge them -- attribution must not overlap.
-        self.ws["E27"] = "T"  # mirror Y27 grey -> Pelvis violation
-        self.ws["F29"] = "SA"  # mirror X29 grey -> Leg violation
+        # Fill only the Pelvis row (asymmetric, mirror left grey, accepted) and
+        # leave both aPLI rows empty so the two scopes differ.
+        self.ws["E27"] = "T"
 
         pelvis = consistency.find_prediction_inconsistencies(
             self.wb, "VRU Impact", "Pelvis Impact"
@@ -110,42 +106,31 @@ class TestLegformSymmetryFindings(unittest.TestCase):
             self.wb, "VRU Impact", "Pelvis & Leg Impact"
         )
 
-        self.assertEqual({f.cell for f in pelvis}, {"E27"})
-        self.assertEqual({f.cell for f in leg}, {"F29"})
-        # Headforms is untouched and is its own scope -- it trips
-        # no_prediction_provided regardless of the legform edits above, and
-        # none of the legform findings leak into this scope.
+        leg_section = "aPLI - Femur / aPLI - Knee & Tibia (Leg Impact)"
+        # Pelvis has a prediction, so its scope is clean; the empty aPLI rows
+        # are reported under Leg Impact only, and the combined alias sees the
+        # same single finding. Headforms is its own scope and stays untouched.
+        self.assertEqual(pelvis, [])
+        self.assertEqual({f.check for f in leg}, {common.CHECK_NO_PREDICTION_PROVIDED})
+        self.assertEqual({f.row_identity.get("Section") for f in leg}, {leg_section})
+        self.assertEqual(
+            {f.row_identity.get("Section") for f in combined}, {leg_section}
+        )
         self.assertEqual({f.check for f in head}, {common.CHECK_NO_PREDICTION_PROVIDED})
         self.assertEqual({f.row_identity.get("Section") for f in head}, {"Headforms"})
-        self.assertEqual({f.cell for f in combined}, {"E27", "F29"})
 
-    def test_blocking_check_still_raises_first_violation(self):
-        self.ws["G28"] = "SA"
-        df = common.sheet_to_dataframe(self.ws)
-        matrix = vru_processing.get_legform_matrix(df)
-        with self.assertRaises(ValueError) as ctx:
-            vru_processing.check_legform_blue_symmetry(matrix)
-        self.assertIn("SA prediction at legform matrix row=1", str(ctx.exception))
-
-    def test_find_consistency_findings_reports_symmetry_not_missing(self):
-        # An empty legform grid is a
-        # legitimate submission (no missing_input findings), but what the
-        # OEM does fill is still validated by the symmetry rule.
+    def test_find_consistency_findings_accepts_asymmetric_grid(self):
+        # A partially filled legform grid is a legitimate submission: no
+        # missing_input finding for the empty cells, and no finding for the
+        # asymmetric SA either.
         self.ws["G28"] = "SA"
 
         findings = integrity.find_consistency_findings(
             self.wb, "VRU Impact", "Leg Impact"
         )
 
-        by_check = {f.check for f in findings}
-        self.assertIn(common.CHECK_LEGFORM_SYMMETRY, by_check)
-        grid_missing = [
-            f
-            for f in findings
-            if f.check == common.CHECK_MISSING_INPUT
-            and f.sheet == "CP - VRU Prediction"
-        ]
-        self.assertEqual(grid_missing, [])
+        grid = [f for f in findings if f.sheet == "CP - VRU Prediction"]
+        self.assertEqual(grid, [])
 
 
 class TestNoPredictionProvidedFindings(unittest.TestCase):
@@ -174,7 +159,6 @@ class TestNoPredictionProvidedFindings(unittest.TestCase):
         # combined Leg Impact element -- aPLI - Femur (row 28) can stay
         # untouched.
         self.ws["E29"] = "T"
-        self.ws["Y29"] = "ST"  # keep it symmetry-clean, unrelated to this check
 
         findings = consistency.find_prediction_inconsistencies(
             self.wb, "VRU Impact", "Leg Impact"

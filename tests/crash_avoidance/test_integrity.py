@@ -317,29 +317,67 @@ class TestFindMissingRequiredInputs(unittest.TestCase):
         self.assertEqual(
             {m.sheet for m in scoped},
             {
+                "FC - Driver State Link",
                 "FC - Car & PTW pred.",
                 "FC - Car & PTW robust. pred.",
                 "Input parameters",
             },
         )
 
-    def test_driver_state_link_belongs_to_ldc_single_vehicle(self):
-        """FC-prefixed, but the Driver state link loadcase sits under Lane
-        Departure Collisions / Single vehicle in data_model.py -- its 45
-        dropdown cells are OEM input and must be required under that
-        element (and no other)."""
-        single_vehicle = integrity.find_missing_required_inputs(
-            self.wb,
-            stage_element="Lane Departure Collisions",
-            stage_subelement="Single vehicle",
+    def _driver_state_link_findings(self, wb, stage_element, stage_subelement):
+        missing = integrity.find_missing_required_inputs(
+            wb, stage_element=stage_element, stage_subelement=stage_subelement
         )
-        frontal = integrity.find_missing_required_inputs(
-            self.wb, stage_element="Frontal Collisions", stage_subelement="Car & PTW"
+        return [m for m in missing if m.sheet == "FC - Driver State Link"]
+
+    def test_fc_driver_state_link_is_required_under_frontal_collisions_only(self):
+        """The grid is the Frontal Collisions per-scenario Driver State Link
+        claim (FC v1.2 sec 2.4.1 / 5.4), owned row by row by the two FC
+        elements. It is not the LDC 3-point "Driver state link" loadcase,
+        so neither Lane Departure Collisions element -- nor Low Speed
+        Collisions -- may be asked for it."""
+        car_ptw = self._driver_state_link_findings(
+            self.wb, "Frontal Collisions", "Car & PTW"
+        )
+        ped_cyc = self._driver_state_link_findings(
+            self.wb, "Frontal Collisions", "Pedestrian & cyclist"
         )
 
-        dsl = [m for m in single_vehicle if m.sheet == "FC - Driver State Link"]
-        self.assertEqual(len(dsl), 45)
-        self.assertNotIn("FC - Driver State Link", {m.sheet for m in frontal})
+        self.assertEqual(len(car_ptw), 21)
+        self.assertEqual(
+            {m.row_identity["A"] for m in car_ptw},
+            {"CCRs", "CCRm", "CMRs", "CCFhos", "CCFhol", "CCCscp", "CMCscp"},
+        )
+        self.assertEqual(len(ped_cyc), 24)
+        self.assertEqual(
+            {m.row_identity["A"] for m in ped_cyc},
+            {"CPLA", "CBLA", "CPTA", "CBTA", "CPNA", "CPFA", "CBNA", "CBFA"},
+        )
+        for scope in [
+            ("Lane Departure Collisions", "Single vehicle"),
+            ("Lane Departure Collisions", "Car & PTW"),
+            ("Low Speed Collisions", "Car & PTW"),
+            ("Low Speed Collisions", "Pedestrian & cyclist"),
+        ]:
+            with self.subTest(scope=scope):
+                self.assertEqual(self._driver_state_link_findings(self.wb, *scope), [])
+
+    def test_fc_driver_state_link_filled_grid_has_no_findings(self):
+        wb = openpyxl.load_workbook(self.pristine_path, data_only=True)
+        ws = wb["FC - Driver State Link"]
+        answers = ["No", "FCW", "AEB", "FCW & AEB", "N/A"]
+        for i, row in enumerate(
+            ws.iter_rows(min_row=4, max_row=18, min_col=2, max_col=4)
+        ):
+            for cell in row:
+                cell.value = answers[i % len(answers)]
+
+        for scope in [
+            ("Frontal Collisions", "Car & PTW"),
+            ("Frontal Collisions", "Pedestrian & cyclist"),
+        ]:
+            with self.subTest(scope=scope):
+                self.assertEqual(self._driver_state_link_findings(wb, *scope), [])
 
     def test_ldc_robust_pred_sheet_is_shared_across_two_subelements(self):
         single_vehicle = integrity.find_missing_required_inputs(

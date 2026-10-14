@@ -36,6 +36,134 @@ _CRITERIA_IDENTITY_COLUMNS = [
     "Criteria",
 ]
 
+# Rear Impact Lab Assessment Sheet v1.3: the rear seat row became "Rear
+# (second row)", a "Rear (third row)" block with its own torso angle was
+# added, and the Static-Rear "Effective height modifier" row was replaced by
+# the "Non-Use position" criterion. Files produced against the previous
+# revision still carry the old spellings and lack the added rows; these
+# declarations let them match their current counterparts.
+REAR_SEAT_SECOND_ROW = "Rear (second row)"
+REAR_SEAT_THIRD_ROW = "Rear (third row)"
+LEGACY_REAR_SEAT = "Rear"
+NON_USE_POSITION = "Non-Use position"
+TORSO_ANGLE_SECOND_ROW = "Torso angle (rear second row)"
+TORSO_ANGLE_THIRD_ROW = "Torso angle (rear third row)"
+LEGACY_TORSO_ANGLE = "Torso angle (rear)"
+
+_REAR_SEAT_RENAME = common.RenamedIdentityValue(
+    column="Seat position",
+    old_value=LEGACY_REAR_SEAT,
+    new_value=REAR_SEAT_SECOND_ROW,
+    anchor=(("Loadcase", "Static-Rear"),),
+)
+# The legacy cell held a head-restraint height in mm, where 1000 was the
+# "no penalty" reading -- and 1000 is also the Non-Use position PASS flag.
+# The row must still match (consumers key on it), but its value is a
+# different measurement and must not be read as a pass.
+_NON_USE_RENAME = common.RenamedIdentityValue(
+    column="Criteria",
+    old_value="Effective height modifier",
+    new_value=NON_USE_POSITION,
+    anchor=(("Loadcase", "Static-Rear"), ("Seat position", REAR_SEAT_SECOND_ROW)),
+    carries_value=False,
+)
+_TORSO_ANGLE_RENAME = common.RenamedIdentityValue(
+    column="Input parameter",
+    old_value=LEGACY_TORSO_ANGLE,
+    new_value=TORSO_ANGLE_SECOND_ROW,
+    anchor=(("Stage element", "Rear Impact"), ("Stage subelement", "Whiplash")),
+)
+_FARSIDE_RED_LINE_RENAME = common.RenamedIdentityValue(
+    column="Input parameter",
+    old_value="Red line >125 mm outboard of the orange line",
+    new_value="Red line >125 mm outboard of the orange line ?",
+    anchor=(("Stage element", "Side Impact"), ("Stage subelement", "Farside")),
+)
+_THIRD_ROW_TORSO_ANGLE_ROW = common.AddedRow(
+    identity=(
+        ("Stage", "Crash Protection"),
+        ("Stage element", "Rear Impact"),
+        ("Stage subelement", "Whiplash"),
+        ("Input parameter", TORSO_ANGLE_THIRD_ROW),
+    )
+)
+_THIRD_ROW_CRITERIA_ROWS = [
+    common.AddedRow(
+        identity=(
+            ("Loadcase", "Static-Rear"),
+            ("Seat position", REAR_SEAT_THIRD_ROW),
+            ("Dummy", "HPM"),
+            ("Body region", "Neck"),
+            ("Criteria", criteria),
+        )
+    )
+    for criteria in (
+        "Effective height - Lowest",
+        "Effective height - Highest",
+        NON_USE_POSITION,
+        "Backset - Lowest",
+        "Backset - Mid",
+    )
+]
+_THIRD_ROW_BODY_REGION_SCORE_ROW = common.AddedRow(
+    identity=(
+        ("Stage element", "Rear Impact"),
+        ("Stage subelement", "Whiplash"),
+        ("Loadcase", "Static-Rear"),
+        ("Seat position", REAR_SEAT_THIRD_ROW),
+        ("Dummy", "HPM"),
+        ("Body region", "Neck"),
+    )
+)
+_THIRD_ROW_DUMMY_SCORE_ROW = common.AddedRow(
+    identity=(
+        ("Stage", "Crash Protection"),
+        ("Stage element", "Rear Impact"),
+        ("Stage subelement", "Whiplash"),
+        ("Loadcase", "Static-Rear"),
+        ("Seat position", REAR_SEAT_THIRD_ROW),
+        ("Dummy", "HPM"),
+    )
+)
+
+# Static-Front was scored as one "Front" seat (max 1) holding whichever
+# front seat scored lower; it is now scored per seat, Driver and Front
+# Passenger at 0.5 each. The old "Front" row reads as the Driver row, and its
+# body-region inspection carries over to the added Front Passenger row, since
+# it applied to the one front seat that was scored.
+STATIC_FRONT_REVISION = "static-front-per-seat"
+LEGACY_STATIC_FRONT_SEAT = "Front"
+_STATIC_FRONT_SEAT_RENAME = common.RenamedIdentityValue(
+    column="Seat position",
+    old_value=LEGACY_STATIC_FRONT_SEAT,
+    new_value="Driver",
+    anchor=(("Loadcase", "Static-Front"),),
+    revision=STATIC_FRONT_REVISION,
+)
+_STATIC_FRONT_BODY_REGION = (
+    ("Stage element", "Rear Impact"),
+    ("Stage subelement", "Whiplash"),
+    ("Loadcase", "Static-Front"),
+)
+_STATIC_FRONT_PASSENGER_BODY_REGION_SCORE_ROW = common.AddedRow(
+    identity=_STATIC_FRONT_BODY_REGION
+    + (("Seat position", "Front Passenger"), ("Dummy", "HPM"), ("Body region", "Neck")),
+    copy_values_from=_STATIC_FRONT_BODY_REGION
+    + (("Seat position", "Driver"), ("Dummy", "HPM"), ("Body region", "Neck")),
+    revision=STATIC_FRONT_REVISION,
+)
+_STATIC_FRONT_PASSENGER_DUMMY_SCORE_ROW = common.AddedRow(
+    identity=(
+        ("Stage", "Crash Protection"),
+        ("Stage element", "Rear Impact"),
+        ("Stage subelement", "Whiplash"),
+        ("Loadcase", "Static-Front"),
+        ("Seat position", "Front Passenger"),
+        ("Dummy", "HPM"),
+    ),
+    revision=STATIC_FRONT_REVISION,
+)
+
 SHEET_SCHEMAS = {
     "Input parameters": common.GreyCellSheetSchema(
         identity_columns=[
@@ -45,6 +173,14 @@ SHEET_SCHEMAS = {
             "Input parameter",
         ],
         grey_columns=["Value"],
+        legacy_row_migrations=[
+            _TORSO_ANGLE_RENAME,
+            _FARSIDE_RED_LINE_RENAME,
+            _THIRD_ROW_TORSO_ANGLE_ROW,
+        ],
+        # Euro NCAP's Lab Assessment Sheets carry these rows in their own
+        # layout (e.g. Rear Impact without the Frontal/Side placeholder rows).
+        match_rows_by_identity=True,
     ),
     "Test Scores": common.GreyCellSheetSchema(
         identity_columns=["Stage", "Stage element", "Stage subelement"],
@@ -66,6 +202,12 @@ SHEET_SCHEMAS = {
         grey_columns=["Inspection [%]"],
         prediction_required_columns=[],
         computed_columns=["Body regionscore", "Modifiers", "Score"],
+        legacy_row_migrations=[
+            _REAR_SEAT_RENAME,
+            _THIRD_ROW_BODY_REGION_SCORE_ROW,
+            _STATIC_FRONT_SEAT_RENAME,
+            _STATIC_FRONT_PASSENGER_BODY_REGION_SCORE_ROW,
+        ],
     ),
     "CP - Dummy Scores": common.GreyCellSheetSchema(
         identity_columns=[
@@ -78,6 +220,12 @@ SHEET_SCHEMAS = {
         ],
         grey_columns=[],
         computed_columns=["Capping?", "Score"],
+        legacy_row_migrations=[
+            _REAR_SEAT_RENAME,
+            _THIRD_ROW_DUMMY_SCORE_ROW,
+            _STATIC_FRONT_SEAT_RENAME,
+            _STATIC_FRONT_PASSENGER_DUMMY_SCORE_ROW,
+        ],
     ),
     "CP - Frontal Offset": common.GreyCellSheetSchema(
         identity_columns=_CRITERIA_IDENTITY_COLUMNS,
@@ -138,6 +286,8 @@ SHEET_SCHEMAS = {
         grey_columns=["Value"],
         prediction_required_columns=[],
         applies_to_stage_elements=[("Rear Impact", "Whiplash")],
+        legacy_row_migrations=[_REAR_SEAT_RENAME, _NON_USE_RENAME]
+        + _THIRD_ROW_CRITERIA_ROWS,
     ),
 }
 
@@ -196,11 +346,8 @@ GRID_SHEET_SECTION_STAGE_ELEMENTS = {
 # Sections exempt from the missing-required-input check: the OEM chooses which legform
 # and headform prediction cells to fill based on the car's layout and its
 # own prediction, so an empty cell there is a legitimate submission, never
-# a missing input. What the OEM *does* fill is still validated -- the
-# T/ST/SA symmetry rule reports through
-# consistency.find_prediction_inconsistencies (legform_symmetry findings),
-# and preprocess keeps rejecting asymmetric patterns -- and every exempt
-# section must still get at least one prediction somewhere in it
+# a missing input (asymmetric legform patterns are accepted too). Every
+# exempt section must still get at least one prediction somewhere in it
 # (consistency.find_prediction_inconsistencies' no_prediction_provided
 # findings) now that no individual cell is required. The Pelvis/Leg
 # "Input parameters" rows stay required via the schema'd sheets.
@@ -310,7 +457,7 @@ def find_consistency_findings(
     declares: the missing required inputs
     (find_missing_required_inputs) plus every report-only prediction-rule
     violation (consistency.find_prediction_inconsistencies --
-    legform_symmetry). Each finding says which rule produced it in
+    no_prediction_provided). Each finding says which rule produced it in
     ``check`` (common.CHECK_*). Same scope convention and error behaviour
     as find_missing_required_inputs: ValueError for an undeclared scope,
     common.TemplateIntegrityError for structural problems."""
@@ -318,7 +465,33 @@ def find_consistency_findings(
     findings.extend(
         consistency.find_prediction_inconsistencies(wb, stage_element, stage_subelement)
     )
+    findings.extend(
+        consistency.find_rear_torso_angle_findings(wb, stage_element, stage_subelement)
+    )
     return findings
+
+
+def to_current_identity(sheet_name: str, identity: dict) -> dict:
+    """Rewrite a row identity ({identity column: value}) of *sheet_name*
+    from any accepted legacy spelling into the current template's spelling
+    (e.g. Static-Rear seat "Rear" -> "Rear (second row)", and its
+    "Effective height modifier" -> "Non-Use position"). Iterates to a fixed
+    point, so a rename anchored on another rename's result still applies.
+    Unknown sheets and identities that match no declared rename come back
+    unchanged, so every row can be passed through unconditionally."""
+    schema = SHEET_SCHEMAS.get(sheet_name)
+    if schema is None:
+        return dict(identity)
+    return common.to_current_identity_for_schema(schema, identity)
+
+
+def legacy_identity_spellings(sheet_name: str) -> list:
+    """[(identity column, legacy value, current value), ...] declared for
+    *sheet_name*; [] for a sheet without legacy spellings."""
+    schema = SHEET_SCHEMAS.get(sheet_name)
+    if schema is None:
+        return []
+    return common.legacy_identity_spellings_for_schema(schema)
 
 
 def find_consistency_findings_in_file(

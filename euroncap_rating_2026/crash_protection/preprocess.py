@@ -117,6 +117,7 @@ def add_vru_sheets_to_dfs(dfs: dict, input_selected_points=None) -> dict:
 def preprocess(input_file, output_path):
     """Preprocess VRU test points and generate loadcases from input Excel file."""
     common.check_version(input_file, common.CliCommand.GENERATE_TEMPLATE)
+    common.check_protocol(input_file)
     print(
         f"[Crash Protection] Preprocessing VRU test points and generating loadcases..."
     )

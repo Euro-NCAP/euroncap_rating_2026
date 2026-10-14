@@ -18,9 +18,14 @@ from importlib.resources import files
 from pathlib import Path
 
 import openpyxl
+import pandas as pd
 
 from euroncap_rating_2026 import common
-from euroncap_rating_2026.crash_avoidance import report_writer
+from euroncap_rating_2026.crash_avoidance import data_model, report_writer
+from euroncap_rating_2026.crash_avoidance.test_info import (
+    collapse_cpla_cbla_aeb_duplicate_rows,
+    read_loadcase_info,
+)
 
 PREDICTION_SHEET = "FC - Ped & Cyc pred."
 
@@ -354,6 +359,99 @@ class TestBoxesPromotedStandardRangeCells(unittest.TestCase):
                     _has_full_box(ws.cell(row=row, column=IL_25_PERCENT_COL)),
                     f"row {row} missing the newly-promoted 25% box",
                 )
+
+
+# CPTAfs & CPTAns, 10 km/h Nearside at 25% impact location: matrix point
+# (4, 3), on worksheet row 46 of the uncollapsed grid -- two rows above the
+# CPTAfo & CPTAno header, so a stale coordinate lands on that merged header
+# once CBLA's 50/60 km/h choice rows are collapsed away.
+CPTA_SCENARIO = "CPTAfs & CPTAns"
+CPTA_TEST_POINT = "(4,3)"
+CPTA_POINT_ROW_UNCOLLAPSED = 46
+CPTA_POINT_ROW_COLLAPSED = 44
+
+
+def _verification_frame():
+    return pd.DataFrame([["Scenario", "Test point"], [CPTA_SCENARIO, CPTA_TEST_POINT]])
+
+
+def _read_prediction_frame(input_file):
+    return common.read_excel_file_to_dfs(
+        input_file, preserve_na_sheets=data_model.PRESERVE_NA_SHEETS
+    )[PREDICTION_SHEET]
+
+
+def _collapse_cbla(prediction_df):
+    loadcase_info = read_loadcase_info(
+        prediction_df, None, "CBLA", data_model.StageSubelementKey.FC
+    )
+    collapsed_df, removed, _ = collapse_cpla_cbla_aeb_duplicate_rows(
+        prediction_df, loadcase_info.test_points, "CBLA"
+    )
+    assert removed, "expected the CBLA choice rows to collapse"
+    return collapsed_df
+
+
+class TestWriteReportGridFollowsPredictionFrame(unittest.TestCase):
+    """The report grid must describe the same rows as the prediction frame
+    the selected-point marks come from."""
+
+    def _write_and_load(self, input_file, prediction_frame, output_dir):
+        report_writer.write_report(
+            common.CliCommand.PREPROCESS,
+            input_file,
+            updated_dfs={
+                PREDICTION_SHEET: prediction_frame,
+                "FC - Ped & Cyc verif.": _verification_frame(),
+            },
+            output_path=output_dir,
+            format_prediction_cells=True,
+        )
+        output_file = Path(output_dir) / "ca_preprocessed_template.xlsx"
+        return openpyxl.load_workbook(str(output_file))[PREDICTION_SHEET]
+
+    def test_write_report_marks_after_cpla_cbla_collapse(self):
+        """A frame prepared before the collapse rule existed (AEB declared in
+        CBLA's 20 km/h choice rows, never collapsed): the report builds on
+        the full grid with the X on the selected point's row."""
+        with (
+            tempfile.TemporaryDirectory() as input_dir,
+            tempfile.TemporaryDirectory() as output_dir,
+        ):
+            input_file = _make_cbla_input_file(input_dir)
+            ws = self._write_and_load(
+                input_file, _read_prediction_frame(input_file), output_dir
+            )
+
+            self.assertEqual(ws.cell(row=CBLA_50_ROW, column=2).value, "20 km/h")
+            self.assertEqual(
+                ws.cell(row=CPTA_POINT_ROW_UNCOLLAPSED, column=2).value, "Nearside"
+            )
+            self.assertEqual(
+                ws.cell(row=CPTA_POINT_ROW_UNCOLLAPSED, column=IL_25_PERCENT_COL).value,
+                "X",
+            )
+
+    def test_collapsed_frame_keeps_marks_on_collapsed_grid(self):
+        """A collapsed frame with an uncollapsed workbook (what preprocess and
+        current locks produce): the grid collapses and the X stays on the
+        selected point's row, not shifted a second time."""
+        with (
+            tempfile.TemporaryDirectory() as input_dir,
+            tempfile.TemporaryDirectory() as output_dir,
+        ):
+            input_file = _make_cbla_input_file(input_dir)
+            collapsed_df = _collapse_cbla(_read_prediction_frame(input_file))
+            ws = self._write_and_load(input_file, collapsed_df, output_dir)
+
+            self.assertEqual(ws.cell(row=CBLA_50_ROW, column=1).value, "70 km/h")
+            self.assertEqual(
+                ws.cell(row=CPTA_POINT_ROW_COLLAPSED, column=2).value, "Nearside"
+            )
+            self.assertEqual(
+                ws.cell(row=CPTA_POINT_ROW_COLLAPSED, column=IL_25_PERCENT_COL).value,
+                "X",
+            )
 
 
 if __name__ == "__main__":

@@ -48,7 +48,17 @@ def set_relevant_columns_to_default_values(verification_test_dfs: dict) -> dict:
         df.columns = pd.Index([str(col).strip() for col in df.columns])
 
         if "Function" in df.columns:
-            df["Function"] = df["Function"].fillna("AEB")
+            # CBDA does not write "Function" (the dooring function is the
+            # tool-filled "Type of system" column), so its rows must not
+            # silently become "AEB". No default for "Type of system": blank
+            # is a legitimate state that compute-score handles.
+            if "Scenario" in df.columns:
+                non_cbda = df["Scenario"].astype(str).str.strip() != "CBDA"
+                df.loc[non_cbda, "Function"] = df.loc[non_cbda, "Function"].fillna(
+                    "AEB"
+                )
+            else:
+                df["Function"] = df["Function"].fillna("AEB")
 
         if "Day/Night" in df.columns:
             df["Day/Night"] = df["Day/Night"].fillna("Day")
@@ -242,6 +252,7 @@ def add_verification_sheets_to_dfs(dfs: dict, input_selected_points=None) -> dic
 def preprocess(input_file, output_path):
     """Select test points and generate loadcases from input Excel file."""
     common.check_version(input_file, common.CliCommand.GENERATE_TEMPLATE)
+    common.check_protocol(input_file)
     print(f"[Crash Avoidance] Preprocessing test points and generating loadcases...")
 
     # Re-derive a trusted copy of the input: every reference/structural cell

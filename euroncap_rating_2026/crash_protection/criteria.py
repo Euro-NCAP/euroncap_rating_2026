@@ -342,11 +342,10 @@ class Criteria(BaseModel):
             # Current assumption is that interval are ALWAYS
             # Closed on the left (<=) - Open on the right (<)
             # v1 <= x < v2
-            # ZERO_SWITCH criteria (HPL == LPL, a single pass/fail limit, e.g.
-            # rear seat Backset) instead document the pass condition as
-            # value <= limit (inclusive), per the Euro NCAP protocol wording.
+            # ZERO_SWITCH criteria (HPL == LPL, a single pass/fail limit): a
+            # value exactly at the limit fails (red).
             if self.criteria_type == CriteriaType.ZERO_SWITCH:
-                if self.value <= self.green_yellow_threshold:
+                if self.value < self.green_yellow_threshold:
                     test_output_color = "green"
                 else:
                     test_output_color = "red"

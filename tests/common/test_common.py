@@ -1232,7 +1232,9 @@ class TestCheckVersion(unittest.TestCase):
             minor = current_parts[1] if len(current_parts) > 1 else "0"
             # Use a different patch version
             different_patch = (
-                str(int(current_parts[2]) + 1) if len(current_parts) > 2 else "99"
+                str(common.parse_version(version.VERSION).patch + 1)
+                if len(current_parts) > 2
+                else "99"
             )
 
             wb = openpyxl.Workbook()
@@ -1483,6 +1485,15 @@ class TestVersionInfo(unittest.TestCase):
             common.VersionInfo.from_string("1.2.3.4")
         with self.assertRaises(ValueError):
             common.VersionInfo.from_string("invalid")
+        with self.assertRaises(ValueError):
+            common.VersionInfo.from_string("1.2.3x1")
+
+    def test_version_info_pre_release_compares_as_release_patch(self):
+        """An alpha/beta/rc tag such as 5.4.9a7 parses to patch 9."""
+        for pre_release in ("5.4.9a7", "5.4.9b1", "5.4.9rc2"):
+            with self.subTest(version=pre_release):
+                v = common.VersionInfo.from_string(pre_release)
+                self.assertEqual((v.major, v.minor, v.patch), (5, 4, 9))
 
 
 class TestParseVersion(unittest.TestCase):
@@ -1545,6 +1556,21 @@ class TestOppositeFfill(unittest.TestCase):
         result = common.opposite_ffill(df.copy())
         self.assertTrue(pd.isna(result.loc[1, "A"]))
         self.assertEqual(result.loc[2, "A"], 2)
+
+    def test_opposite_ffill_group_column_keeps_repeat_across_groups(self):
+        df = pd.DataFrame(
+            {
+                "Category": ["X", "Y", "", ""],
+                "Scenario": ["General", "General", "Other", "Other"],
+            }
+        )
+        result = common.opposite_ffill(df.copy(), group_column="Category")
+        # Same Scenario, different Category: kept.
+        self.assertEqual(result.loc[1, "Scenario"], "General")
+        # Blank Category rows belong to the group above: repeats still blanked.
+        self.assertTrue(pd.isna(result.loc[3, "Scenario"]))
+        self.assertTrue(pd.isna(result.loc[3, "Category"]))
+        self.assertEqual(result.loc[2, "Category"], "")
 
 
 def _write_row(ws, row_idx, values_by_header, header):
@@ -3137,3 +3163,367 @@ class TestUpdateScoringSheetDashPlaceholder(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LegacyRowMigrationTestCase(unittest.TestCase):
+    """Shared declarations for the legacy_row_migrations tests: a sheet with
+    identity columns Key/Label, where a revision renamed the Label of Key "B"
+    from "old" to "new" (value carried), renamed the Label of Key "C" from
+    "mod" to "flag" (value dropped: different quantity under a new name) and
+    appended a row Key "D" / Label "added"."""
+
+    HEADER = ("Key", "Label", "Grey")
+    PRISTINE = [
+        ("A", "a", None),
+        ("B", "new", None),
+        ("C", "flag", None),
+        ("D", "added", None),
+    ]
+    LEGACY = [("A", "a", "va"), ("B", "old", "vb"), ("C", "mod", "vc")]
+    CURRENT = [
+        ("A", "a", "va"),
+        ("B", "new", "vb"),
+        ("C", "flag", "vc"),
+        ("D", "added", "vd"),
+    ]
+
+    def _migrations(self):
+        return [
+            common.RenamedIdentityValue(
+                column="Label", old_value="old", new_value="new", anchor=(("Key", "B"),)
+            ),
+            common.RenamedIdentityValue(
+                column="Label",
+                old_value="mod",
+                new_value="flag",
+                anchor=(("Key", "C"),),
+                carries_value=False,
+            ),
+            common.AddedRow(identity=(("Key", "D"), ("Label", "added"))),
+        ]
+
+    def _copying_schema(self):
+        """The D row declared as split off the B row."""
+        return self._schema(
+            self._migrations()[:2]
+            + [
+                common.AddedRow(
+                    identity=(("Key", "D"), ("Label", "added")),
+                    copy_values_from=(("Key", "B"), ("Label", "new")),
+                )
+            ]
+        )
+
+    def _schema(self, migrations=None):
+        return common.GreyCellSheetSchema(
+            identity_columns=["Key", "Label"],
+            grey_columns=["Grey"],
+            legacy_row_migrations=(
+                self._migrations() if migrations is None else migrations
+            ),
+        )
+
+
+class TestRebuildTrustedSheetWithMigrations(LegacyRowMigrationTestCase):
+    def _make_wb(self, rows):
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Data"
+        ws.append(list(self.HEADER))
+        for row in rows:
+            ws.append(list(row))
+        return wb
+
+    def _rebuild(self, user_rows, schema=None):
+        pristine_wb = self._make_wb(self.PRISTINE)
+        user_wb = self._make_wb(user_rows)
+        common.rebuild_trusted_sheet(
+            pristine_wb["Data"], user_wb["Data"], schema or self._schema(), "Data"
+        )
+        ws = pristine_wb["Data"]
+        return [ws.cell(row=r, column=3).value for r in range(2, 6)], ws
+
+    def test_legacy_file_matches_renamed_rows_and_skips_added_row(self):
+        grey, ws = self._rebuild(self.LEGACY)
+        # Renamed-and-carried keeps its value, renamed-and-dropped is blank,
+        # the added row the file predates is blank; labels come from pristine.
+        self.assertEqual(grey, ["va", "vb", None, None])
+        self.assertEqual(
+            [ws.cell(row=r, column=2).value for r in range(2, 6)],
+            ["a", "new", "flag", "added"],
+        )
+
+    def test_current_file_keeps_every_value(self):
+        grey, _ = self._rebuild(self.CURRENT)
+        self.assertEqual(grey, ["va", "vb", "vc", "vd"])
+
+    def test_current_file_missing_the_added_row_is_rejected(self):
+        # Only a legacy-layout sheet may lack a declared added row; on a
+        # current-layout sheet that is a deleted row like any other.
+        with self.assertRaises(common.TemplateIntegrityError) as ctx:
+            self._rebuild(self.CURRENT[:3])
+        self.assertIn(
+            "Row 5: a row of the official template is missing", str(ctx.exception)
+        )
+
+    def test_sheet_with_only_added_rows_declared_accepts_their_absence(self):
+        # No rename to tell the revisions apart: a file lacking the added
+        # row can only be a legacy one.
+        schema = self._schema(
+            [common.AddedRow(identity=(("Key", "D"), ("Label", "added")))]
+        )
+        grey, _ = self._rebuild(
+            [("A", "a", "va"), ("B", "new", "vb"), ("C", "flag", "vc")], schema
+        )
+        self.assertEqual(grey, ["va", "vb", "vc", None])
+
+    def test_rename_only_applies_on_its_anchor_row(self):
+        with self.assertRaises(common.TemplateIntegrityError):
+            self._rebuild([("A", "old", "va"), ("B", "new", "vb"), ("C", "flag", "vc")])
+
+    def test_mixed_revisions_on_one_sheet_are_rejected(self):
+        with self.assertRaises(common.TemplateIntegrityError) as ctx:
+            self._rebuild([("A", "a", "va"), ("B", "old", "vb"), ("C", "flag", "vc")])
+        self.assertIn("different template revision", str(ctx.exception))
+        with self.assertRaises(common.TemplateIntegrityError):
+            self._rebuild(self.LEGACY + [("D", "added", "vd")])
+
+    def test_reordered_deleted_and_inserted_rows_are_rejected(self):
+        for rows in (
+            [("B", "old", "vb"), ("A", "a", "va"), ("C", "mod", "vc")],
+            [("A", "a", "va"), ("C", "mod", "vc")],
+            [
+                ("A", "a", "va"),
+                ("X", "x", "vx"),
+                ("B", "old", "vb"),
+                ("C", "mod", "vc"),
+            ],
+            self.LEGACY + [("E", "extra", "ve")],
+        ):
+            with self.subTest(rows=rows):
+                with self.assertRaises(common.TemplateIntegrityError):
+                    self._rebuild(rows)
+
+    def test_mismatch_names_the_user_row(self):
+        with self.assertRaises(common.TemplateIntegrityError) as ctx:
+            self._rebuild([("A", "a", "va"), ("B", "wrong", "vb"), ("C", "mod", "vc")])
+        self.assertIn("Row 3: column 'Label' is 'wrong'", str(ctx.exception))
+
+    def test_stray_value_below_the_table_is_ignored(self):
+        grey, _ = self._rebuild(
+            self.LEGACY + [(None, None, "stray"), (None, None, None)]
+        )
+        self.assertEqual(grey, ["va", "vb", None, None])
+
+    def test_schema_without_migrations_is_unchanged(self):
+        schema = common.GreyCellSheetSchema(
+            identity_columns=["Key", "Label"], grey_columns=["Grey"]
+        )
+        with self.assertRaises(common.TemplateIntegrityError):
+            self._rebuild(self.LEGACY, schema)
+        grey, _ = self._rebuild(self.CURRENT, schema)
+        self.assertEqual(grey, ["va", "vb", "vc", "vd"])
+
+    def test_both_legacy_mechanisms_on_one_schema_raise(self):
+        with self.assertRaises(ValueError):
+            common.GreyCellSheetSchema(
+                identity_columns=["Key", "Label"],
+                legacy_unlabeled_cells=[
+                    common.LegacyUnlabeledCell(
+                        column="Label", anchor={"Key": "A"}, value="a"
+                    )
+                ],
+                legacy_row_migrations=self._migrations(),
+            )
+
+    def test_added_row_copies_values_from_its_source_row(self):
+        grey, _ = self._rebuild(self.LEGACY, self._copying_schema())
+        self.assertEqual(grey, ["va", "vb", None, "vb"])
+        grey, _ = self._rebuild(self.CURRENT, self._copying_schema())
+        self.assertEqual(grey, ["va", "vb", "vc", "vd"])
+
+    def test_layout_is_checked_per_revision(self):
+        # The B rename belongs to a later revision than the C rename and the
+        # added D row: a file produced between the two spells B the old way
+        # and C/D the new way.
+        migrations = self._migrations()
+        migrations[0] = common.RenamedIdentityValue(
+            column="Label",
+            old_value="old",
+            new_value="new",
+            anchor=(("Key", "B"),),
+            revision="later",
+        )
+        schema = self._schema(migrations)
+        grey, _ = self._rebuild(
+            [("A", "a", "va"), ("B", "old", "vb")] + self.CURRENT[2:], schema
+        )
+        self.assertEqual(grey, ["va", "vb", "vc", "vd"])
+        # Within one revision the layouts still may not mix.
+        with self.assertRaises(common.TemplateIntegrityError):
+            self._rebuild(self.LEGACY + [("D", "added", "vd")], schema)
+
+
+class TestRebuildTrustedDfWithMigrations(LegacyRowMigrationTestCase):
+    def _make_df(self, rows):
+        return pd.DataFrame(rows, columns=list(self.HEADER))
+
+    def _rebuild(self, user_rows):
+        result = common.rebuild_trusted_df(
+            self._make_df(self.PRISTINE),
+            self._make_df(user_rows),
+            self._schema(),
+            "Data",
+        )
+        return [None if pd.isna(v) else v for v in result["Grey"].tolist()], result
+
+    def test_legacy_frame_matches_renamed_rows_and_skips_added_row(self):
+        grey, result = self._rebuild(self.LEGACY)
+        self.assertEqual(grey, ["va", "vb", None, None])
+        self.assertEqual(result["Label"].tolist(), ["a", "new", "flag", "added"])
+
+    def test_current_frame_keeps_every_value(self):
+        grey, _ = self._rebuild(self.CURRENT)
+        self.assertEqual(grey, ["va", "vb", "vc", "vd"])
+
+    def test_added_row_copies_values_from_its_source_row(self):
+        result = common.rebuild_trusted_df(
+            self._make_df(self.PRISTINE),
+            self._make_df(self.LEGACY),
+            self._copying_schema(),
+            "Data",
+        )
+        self.assertEqual(result["Grey"].tolist()[3], "vb")
+
+    def test_blank_string_continuation_and_trailing_blank_rows(self):
+        grey, _ = self._rebuild(
+            [("A", "a", "va"), ("B", "old", "vb"), ("C", "mod", "vc"), ("", "", None)]
+        )
+        self.assertEqual(grey, ["va", "vb", None, None])
+
+    def test_tampering_is_rejected(self):
+        for rows in (
+            [("A", "old", "va"), ("B", "new", "vb"), ("C", "flag", "vc")],
+            self.CURRENT[:3],
+            [("A", "a", "va"), ("B", "old", "vb"), ("C", "flag", "vc")],
+            self.LEGACY + [("D", "added", "vd")],
+            [("A", "a", "va"), ("C", "mod", "vc")],
+            self.LEGACY + [("E", "extra", "ve")],
+        ):
+            with self.subTest(rows=rows):
+                with self.assertRaises(common.TemplateIntegrityError):
+                    self._rebuild(rows)
+
+
+class TestIdentityRewritingForSchema(LegacyRowMigrationTestCase):
+    def test_to_current_identity_and_spellings(self):
+        schema = self._schema()
+        self.assertEqual(
+            common.to_current_identity_for_schema(schema, {"Key": "B", "Label": "old"}),
+            {"Key": "B", "Label": "new"},
+        )
+        self.assertEqual(
+            common.to_current_identity_for_schema(schema, {"Key": "A", "Label": "old"}),
+            {"Key": "A", "Label": "old"},
+        )
+        self.assertEqual(
+            common.legacy_identity_spellings_for_schema(schema),
+            [("Label", "old", "new"), ("Label", "mod", "flag")],
+        )
+
+    def test_fixed_point_through_a_chained_anchor(self):
+        schema = common.GreyCellSheetSchema(
+            identity_columns=["Seat", "Criteria"],
+            legacy_row_migrations=[
+                common.RenamedIdentityValue("Seat", "Rear", "Rear (second row)"),
+                common.RenamedIdentityValue(
+                    "Criteria",
+                    "mod",
+                    "flag",
+                    anchor=(("Seat", "Rear (second row)"),),
+                ),
+            ],
+        )
+        self.assertEqual(
+            common.to_current_identity_for_schema(
+                schema, {"Seat": "Rear", "Criteria": "mod"}
+            ),
+            {"Seat": "Rear (second row)", "Criteria": "flag"},
+        )
+
+
+class TestMatchRowsByIdentity(LegacyRowMigrationTestCase):
+    """GreyCellSheetSchema.match_rows_by_identity: rows are matched to the
+    pristine template by identity rather than position, on both paths."""
+
+    def _identity_schema(self):
+        return common.GreyCellSheetSchema(
+            identity_columns=["Key", "Label"],
+            grey_columns=["Grey"],
+            legacy_row_migrations=self._migrations(),
+            match_rows_by_identity=True,
+        )
+
+    def _df(self, rows):
+        return pd.DataFrame(list(rows), columns=list(self.HEADER))
+
+    def _rebuild_df(self, rows, schema=None):
+        return common.rebuild_trusted_df(
+            self._df(self.PRISTINE),
+            self._df(rows),
+            schema or self._identity_schema(),
+            "Data",
+        )
+
+    def _rebuild_ws(self, rows):
+        import openpyxl
+
+        def ws_of(data):
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.append(list(self.HEADER))
+            for row in data:
+                ws.append(list(row))
+            return ws
+
+        pristine_ws = ws_of(self.PRISTINE)
+        common.rebuild_trusted_sheet(
+            pristine_ws, ws_of(rows), self._identity_schema(), "Data"
+        )
+        return [[c.value for c in row] for row in pristine_ws.iter_rows(min_row=2)]
+
+    def test_reordered_rows_land_on_their_template_row(self):
+        reordered = [self.CURRENT[i] for i in (3, 1, 0, 2)]
+        with self.assertRaises(common.TemplateIntegrityError):
+            self._rebuild_df(reordered, self._schema())
+        self.assertEqual(
+            self._rebuild_df(reordered)["Grey"].tolist(), ["va", "vb", "vc", "vd"]
+        )
+        self.assertEqual(
+            self._rebuild_ws(reordered), [list(row) for row in self.CURRENT]
+        )
+
+    def test_legacy_layout_matches_the_positional_walk(self):
+        pd.testing.assert_frame_equal(
+            self._rebuild_df(self.LEGACY), self._rebuild_df(self.LEGACY, self._schema())
+        )
+
+    def test_absent_row_is_blank_and_unknown_row_is_rejected(self):
+        partial = [self.CURRENT[i] for i in (0, 2, 3)]
+        self.assertTrue(pd.isna(self._rebuild_df(partial)["Grey"].tolist()[1]))
+        with self.assertRaisesRegex(
+            common.TemplateIntegrityError, "Row 3: 'Z / z' matches no row"
+        ):
+            self._rebuild_ws(self.CURRENT[:1] + [("Z", "z", "x")])
+
+    def test_cannot_be_combined_with_legacy_unlabeled_cells(self):
+        with self.assertRaises(ValueError):
+            common.GreyCellSheetSchema(
+                identity_columns=["Key"],
+                legacy_unlabeled_cells=[
+                    common.LegacyUnlabeledCell(column="Key", value="A", anchor={})
+                ],
+                match_rows_by_identity=True,
+            )

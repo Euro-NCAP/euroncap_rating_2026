@@ -45,8 +45,18 @@ def get_stage_subelement_key(stage_element_name):
 
 
 def preprocess_stage_subelement(
-    dfs, stage_element_name, subelement_name, input_selected_points=None
+    dfs,
+    stage_element_name,
+    subelement_name,
+    input_selected_points=None,
+    protocol=None,
 ):
+    """Preprocess one stage subelement into its verification sheet.
+
+    *protocol* selects the rating protocol for the subelements whose scoring
+    differs between protocols (Speed Assistance); None reads the marker in
+    dfs["Version"] and falls back to Euro NCAP (common.resolve_protocol).
+    """
     # Key is needed to access STAGE_SUBELEMENT_TO_LOADCASES with the right prefix (LDC, FC, ..)
     stage_subelement_key = get_stage_subelement_key(stage_element_name)
 
@@ -143,7 +153,9 @@ def preprocess_stage_subelement(
 
     elif subelement_name == "Speed Assistance":
 
-        sas_verification_df, scenario_scores_df = speed_assistance.preprocess(dfs)
+        sas_verification_df, scenario_scores_df = speed_assistance.preprocess(
+            dfs, protocol=protocol
+        )
         logger.debug(
             f"Generated Speed Assistance verification dataframe:\n{sas_verification_df}"
         )

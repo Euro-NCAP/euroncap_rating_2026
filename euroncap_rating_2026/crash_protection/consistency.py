@@ -4,30 +4,28 @@
 # Licensed under the Apache License 2.0.
 # See http://www.apache.org/licenses/LICENSE-2.0 for details.
 
-"""Report-only prediction-consistency rules for the crash_protection domain.
+"""Report-only consistency rules for the crash_protection domain.
 
-Two rules on "CP - VRU Prediction":
+One rule on "Input parameters":
 
-- legform_symmetry: the VRU legform T/ST/SA symmetry
-  (vru_processing.check_legform_blue_symmetry, which preprocess enforces by
-  raising on the first offending cell). This module runs the same shared
-  rule logic (collect_legform_symmetry_violations) on the raw uploaded
-  workbook and returns every violation as a common.ConsistencyFinding, so
-  a consuming application can display all of them at once.
+- rear_torso_angle: the second-row torso angle must be a number and the
+  third-row one a number or "N/A" (see find_rear_torso_angle_findings).
+
+One rule on "CP - VRU Prediction":
+
 - no_prediction_provided: the Headforms/Upper legform/aPLI sections have no
   per-cell required-input check (the OEM fills only the cells matching the
   car's layout and its own prediction),
   so nothing else guarantees the OEM entered *any* prediction there. This
   rule reports a section that is entirely untouched (every cell GREY).
 
-The legform_symmetry rule is what still validates the cells the OEM does
-fill in the sections exempted from the missing-input check;
-no_prediction_provided is what guarantees they filled in at least one.
+There is deliberately no legform T/ST/SA symmetry rule: Euro NCAP accepts
+asymmetric legform predictions.
 """
 
 import logging
 
-from openpyxl.utils import get_column_letter
+import numpy as np
 
 from euroncap_rating_2026 import common
 from euroncap_rating_2026.crash_protection import vru_processing
@@ -38,15 +36,13 @@ VRU_PREDICTION_SHEET = "CP - VRU Prediction"
 
 # The legform matrix rows, top to bottom, with the template section each row
 # renders under and the (Stage element, Stage subelement) scope it belongs
-# to. Kept per-row -- not per-block -- because the symmetry rule is
-# evaluated within a row, and consuming applications check Pelvis Impact and
-# Leg Impact as two separate scopes whose results it merges: a block-wide
-# attribution would duplicate every finding across the two calls. The
-# combined "Pelvis & Leg Impact" alias (Test Scores' vocabulary, accepted by
-# integrity.VALID_SCOPE_PAIRS) matches every row. no_prediction_provided
-# reuses the same (section, applies_to) pairs for rows 0 (Pelvis Impact) and
-# 1/2 (Leg Impact, checked together -- either aPLI row having a prediction
-# satisfies the element).
+# to. Only the scope tuples are read; the section labels are documentation.
+# Kept per-row -- not per-block -- because consuming applications check
+# Pelvis Impact and Leg Impact as two separate scopes whose results they
+# merge: row 0 belongs to Pelvis Impact, rows 1/2 to Leg Impact (checked
+# together -- either aPLI row having a prediction satisfies the element).
+# The combined "Pelvis & Leg Impact" alias (Test Scores' vocabulary, accepted
+# by integrity.VALID_SCOPE_PAIRS) matches every row.
 _LEGFORM_ROW_SCOPES = (
     (
         "Upper legform",
@@ -78,41 +74,11 @@ def _legform_row(row_idx: int) -> int:
     doubles as the anchor for a no_prediction_provided finding.
 
     get_legform_matrix slices vru_prediction_df.iloc[LEGFORMS_START_ROW_INDEX:
-    ...][2:, 4:...]: matrix row 0 is DataFrame row LEGFORMS_START_ROW_INDEX+2
-    and matrix column 0 is DataFrame column 4; +2/+1 convert the 0-based,
-    header-stripped DataFrame indices to 1-based worksheet ones.
+    ...][2:, ...]: matrix row 0 is DataFrame row LEGFORMS_START_ROW_INDEX+2;
+    the trailing +2 converts the 0-based, header-stripped DataFrame index to
+    a 1-based worksheet row.
     """
     return vru_processing.LEGFORMS_START_ROW_INDEX + 2 + row_idx + 2
-
-
-def _legform_cell(row_idx: int, j: int) -> str:
-    """Worksheet coordinate of legform matrix cell (row_idx, j)."""
-    ws_col = 4 + j + 1
-    return f"{get_column_letter(ws_col)}{_legform_row(row_idx)}"
-
-
-def _legform_symmetry_message(
-    v: "vru_processing.LegformSymmetryViolation", section: str, cell: str
-) -> str:
-    """The report-only legform_symmetry message: sheet/section/cell plus
-    the symmetric cell it disagrees with -- no matrix row/col/index jargon
-    (that wording stays exclusive to the blocking ValueError,
-    vru_processing._legform_violation_message)."""
-    if v.rule == "sa_out_of_range":
-        sentence = "SA prediction; no symmetric cell exists in this matrix."
-    else:
-        sym_cell = _legform_cell(v.row_idx, v.j_sym)
-        if v.rule == "t_st":
-            sentence = (
-                f"asymmetric T/ST prediction; symmetric cell {sym_cell} has "
-                f"color '{v.sym_color.value}', expected T or ST."
-            )
-        else:  # sa_mismatch
-            sentence = (
-                f"SA prediction; symmetric cell {sym_cell} has color "
-                f"'{v.sym_color.value}', expected SA."
-            )
-    return f"{VRU_PREDICTION_SHEET} — {section} {cell}: {sentence}"
 
 
 def _section_has_prediction(matrix_rows) -> bool:
@@ -151,9 +117,7 @@ def find_prediction_inconsistencies(
 ) -> list:
     """Every prediction-rule violation in *wb* for the crash_protection
     domain, as a list of common.ConsistencyFinding (check =
-    legform_symmetry or no_prediction_provided). Report-only: collects all
-    violations instead of raising on the first -- the blocking behaviour
-    stays in preprocess. Scope filtering follows
+    no_prediction_provided). Report-only. Scope filtering follows
     find_missing_required_inputs' (Stage element, Stage subelement)
     convention; scope validity is the caller's concern
     (integrity.find_consistency_findings validates it once).
@@ -169,33 +133,6 @@ def find_prediction_inconsistencies(
 
     legform_matrix = vru_processing.get_legform_matrix(df)
     if legform_matrix and legform_matrix[0]:
-        col_center = len(legform_matrix[0]) // 2
-        rows_in_scope = [
-            row_idx
-            for row_idx, (_section, applies_to) in enumerate(_LEGFORM_ROW_SCOPES)
-            if common.stage_elements_in_scope(
-                list(applies_to), stage_element, stage_subelement
-            )
-        ]
-        for v in vru_processing.collect_legform_symmetry_violations(legform_matrix):
-            if v.row_idx >= len(_LEGFORM_ROW_SCOPES) or v.row_idx not in rows_in_scope:
-                continue
-            section = _LEGFORM_ROW_SCOPES[v.row_idx][0]
-            cell = _legform_cell(v.row_idx, v.j)
-            findings.append(
-                common.ConsistencyFinding(
-                    sheet=VRU_PREDICTION_SHEET,
-                    column=get_column_letter(4 + v.j + 1),
-                    cell=cell,
-                    row_identity={
-                        "Section": section,
-                        "Lateral position": col_center - v.j,
-                    },
-                    check=common.CHECK_LEGFORM_SYMMETRY,
-                    message=_legform_symmetry_message(v, section, cell),
-                )
-            )
-
         if common.stage_elements_in_scope(
             list(_LEGFORM_ROW_SCOPES[0][1]), stage_element, stage_subelement
         ) and not _section_has_prediction([legform_matrix[0]]):
@@ -233,4 +170,98 @@ def find_prediction_inconsistencies(
                 _no_prediction_finding("Headforms", _HEADFORMS_HEADER_ROW, "color")
             )
 
+    return findings
+
+
+INPUT_PARAMETERS_SHEET = "Input parameters"
+_REAR_WHIPLASH_SCOPE = ("Rear Impact", "Whiplash")
+# Current spelling first, then the previous template revision's.
+_SECOND_ROW_TORSO_ANGLE_NAMES = ("Torso angle (rear second row)", "Torso angle (rear)")
+_THIRD_ROW_TORSO_ANGLE_NAME = "Torso angle (rear third row)"
+
+
+def _is_number(value) -> bool:
+    """A finite number, as a numeric cell or as text (what the torso-angle
+    limit can actually be computed from)."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, str):
+        try:
+            value = float(value.strip())
+        except ValueError:
+            return False
+    if isinstance(value, (int, float)):
+        return bool(np.isfinite(value))
+    return False
+
+
+def find_rear_torso_angle_findings(
+    wb, stage_element: str = None, stage_subelement: str = None
+) -> list:
+    """rear_torso_angle: the two Rear Impact torso-angle input parameters
+    must hold what their seat row needs. The second row is always assessed,
+    so its angle must be a number; the third row's angle must be a number
+    (the vehicle has a third row) or "N/A" (it has none) -- the two answers
+    score differently, so anything else is reported. Blank cells are left to
+    the missing-input check, which already reports them.
+
+    Rows are looked up in the user's own workbook, so a file produced
+    against the previous template revision (no third-row parameter) is
+    simply never asked about it."""
+    if INPUT_PARAMETERS_SHEET not in wb.sheetnames:
+        return []
+    if stage_element is not None and (stage_element, stage_subelement) not in (
+        _REAR_WHIPLASH_SCOPE,
+        (_REAR_WHIPLASH_SCOPE[0], None),
+    ):
+        return []
+    ws = wb[INPUT_PARAMETERS_SHEET]
+    header = {cell.value: cell.column for cell in ws[1]}
+    needed = ("Stage element", "Stage subelement", "Input parameter", "Value")
+    if any(name not in header for name in needed):
+        return []
+
+    findings = []
+    element = subelement = None
+    for row in range(2, ws.max_row + 1):
+        raw_element = ws.cell(row=row, column=header["Stage element"]).value
+        raw_subelement = ws.cell(row=row, column=header["Stage subelement"]).value
+        if not common.is_empty_cell(raw_element):
+            element = raw_element
+        if not common.is_empty_cell(raw_subelement):
+            subelement = raw_subelement
+        if (element, subelement) != _REAR_WHIPLASH_SCOPE:
+            continue
+        parameter = ws.cell(row=row, column=header["Input parameter"]).value
+        value_cell = ws.cell(row=row, column=header["Value"])
+        value = value_cell.value
+        if common.is_empty_cell(value):
+            continue
+        if parameter in _SECOND_ROW_TORSO_ANGLE_NAMES:
+            if _is_number(value):
+                continue
+            expected = "a number (the second row is always assessed)"
+        elif parameter == _THIRD_ROW_TORSO_ANGLE_NAME:
+            if _is_number(value) or common.is_not_applicable(value):
+                continue
+            expected = "a number, or N/A when the vehicle has no third row"
+        else:
+            continue
+        findings.append(
+            common.ConsistencyFinding(
+                sheet=INPUT_PARAMETERS_SHEET,
+                column="Value",
+                cell=value_cell.coordinate,
+                row_identity={
+                    "Stage element": element,
+                    "Stage subelement": subelement,
+                    "Input parameter": parameter,
+                },
+                check=common.CHECK_REAR_TORSO_ANGLE,
+                message=(
+                    f"{INPUT_PARAMETERS_SHEET} — {element} / {subelement} / "
+                    f"{parameter}: '{value}' is not valid; expected {expected}."
+                ),
+            )
+        )
     return findings

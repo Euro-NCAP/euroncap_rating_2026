@@ -37,7 +37,15 @@ logger = logging.getLogger(__name__)
 settings = config.Settings()
 
 
-def get_updated_dfs(dfs: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+def get_updated_dfs(
+    dfs: dict[str, pd.DataFrame], protocol=None
+) -> dict[str, pd.DataFrame]:
+    """Score safe driving from a dict of DataFrames.
+
+    *protocol* selects the rating protocol; None reads the marker in
+    dfs["Version"] and falls back to Euro NCAP (common.resolve_protocol).
+    """
+    protocol = common.resolve_protocol(protocol, dfs=dfs)
     # Re-derive every protected reference cell (Max score, row labels, ...)
     # from the official packaged template instead of trusting it from the
     # caller's dfs -- this is the real dataframe-in/dataframe-out entry point
@@ -45,7 +53,7 @@ def get_updated_dfs(dfs: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     # any preprocess-equivalent's output, so this must happen unconditionally
     # here. Only the designated grey input cells are carried over. Note:
     # "Scenario Scores" is deliberately not covered (see integrity.py).
-    dfs = integrity.rebuild_trusted_input_dfs(dfs)
+    dfs = integrity.rebuild_trusted_input_dfs(dfs, protocol=protocol)
 
     scenario_scores_df = dfs.get("Scenario Scores", pd.DataFrame())
     category_scores_df = dfs.get("Category Scores", pd.DataFrame())
@@ -92,7 +100,7 @@ def get_updated_dfs(dfs: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
         scenario_scores_df,
         ve_sas_score_dict,
         hazard_capping_score,
-    ) = speed_assistance.compute_score(dfs)
+    ) = speed_assistance.compute_score(dfs, protocol=protocol)
     logger.debug(f"Speed assistance score dict: {ve_sas_score_dict}")
 
     # # Compute ACC Performance Score
@@ -150,6 +158,12 @@ def get_updated_dfs(dfs: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
         scenario_scores_df,
         key_column="Category",
         interval_column="Category",
+    )
+    # Advanced speed limit sub-caps a protocol profile may declare:
+    # like the hazard cap below, applied to the category total only, the
+    # per-scenario points stay raw. No-op for a profile without sub-caps.
+    category_scores_df = speed_assistance.apply_advanced_speed_limit_sub_caps(
+        category_scores_df, scenario_scores_df, protocol=protocol
     )
     # Hazard edge case: if any SLIF Local Hazard has 'Red' status, cap the score to 2.5
     # Apply hazard capping score if present
@@ -224,18 +238,20 @@ def get_updated_dfs(dfs: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     return updated_dfs
 
 
-def calculate_score(dfs: dict) -> dict:
+def calculate_score(dfs: dict, protocol=None) -> dict:
     """Calculate safe driving NCAP scores from input dataframes.
 
     Args:
         dfs: Dictionary of dataframes from the input Excel file, including
              ``"DE - DM pred. (cell_colors)"`` produced by
              ``common.read_excel_file_to_dfs(..., load_bg_colors=True)``.
+        protocol: Rating protocol to score against; None reads the marker in
+             dfs["Version"] and falls back to Euro NCAP.
 
     Returns:
         dict: Updated dataframes with computed scores (no internal color keys).
     """
-    updated_dfs = get_updated_dfs(dfs)
+    updated_dfs = get_updated_dfs(dfs, protocol=protocol)
     result = {**dfs, **updated_dfs}
     result = {
         k: v
@@ -274,6 +290,7 @@ def calculate_score(dfs: dict) -> dict:
 def compute_score(input_file, output_path):
     """Compute NCAP scores from an input Excel file."""
     common.check_version(input_file, common.CliCommand.PREPROCESS)
+    common.check_protocol(input_file)
     print(f"[Safe Driving] Computing NCAP scores from input Excel file...")
 
     if not input_file:

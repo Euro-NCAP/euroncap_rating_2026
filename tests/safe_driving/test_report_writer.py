@@ -23,15 +23,17 @@ HEADER_FONT = Font(name="Calibri", color="FFFFFF", bold=True)
 
 class TestDmVerifHeaderRowGuard(unittest.TestCase):
     """
-    Reproduce the "DE - DM verif." row-4 header styling guard from
+    Reproduce the "DE - DM verif." test-point header styling guard from
     report_writer.write_report() inline so the assertion is deterministic
     without real Excel file I/O (same pattern as
     tests/crash_protection/test_vru_blue_legform.py::TestValueColumnSAStyling).
     """
 
     def _apply_guard(self, ws, sheet_name):
-        if sheet_name == "DE - DM verif." and ws.max_row >= 4 and ws.max_column > 1:
-            common.set_header_by_row(ws, 4, HEADER_FILL, HEADER_FONT)
+        if sheet_name == "DE - DM verif." and ws.max_column > 1:
+            header_row = sd_report_writer.get_dm_verif_header_row(ws)
+            if header_row is not None:
+                common.set_header_by_row(ws, header_row, HEADER_FILL, HEADER_FONT)
 
     def _build_short_ws(self):
         wb = openpyxl.Workbook()
@@ -61,16 +63,22 @@ class TestDmVerifHeaderRowGuard(unittest.TestCase):
             ws.cell(row=i, column=1).value = message
         return ws
 
-    def _build_full_ws(self):
+    def _build_full_ws(self, general_requirement_rows=1):
+        # Header row, the General requirements rows, a blank separator row,
+        # then the test-point table with its own "Category" header.
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "DE - DM verif."
-        ws.cell(row=1, column=1).value = "General requirements"
-        ws.cell(row=2, column=1).value = ""
-        ws.cell(row=3, column=1).value = "Category"
-        ws.cell(row=3, column=2).value = "Scenario"
-        ws.cell(row=4, column=1).value = "Transient - Long distraction"
-        ws.cell(row=4, column=2).value = "Non-driving task - Owl - Warning"
+        ws.cell(row=1, column=1).value = "Category"
+        ws.cell(row=1, column=9).value = "Value"
+        ws.cell(row=2, column=1).value = "General requirements"
+        for offset in range(general_requirement_rows):
+            ws.cell(row=2 + offset, column=2).value = f"Requirement {offset + 1}"
+        header_row = 2 + general_requirement_rows + 1
+        ws.cell(row=header_row, column=1).value = "Category"
+        ws.cell(row=header_row, column=2).value = "Scenario"
+        ws.cell(row=header_row + 1, column=1).value = "Transient - Long distraction"
+        ws.cell(row=header_row + 1, column=2).value = "Non-driving task - Owl - Warning"
         return ws
 
     def test_guard_skips_short_message_sheet(self):
@@ -104,6 +112,17 @@ class TestDmVerifHeaderRowGuard(unittest.TestCase):
         for cell in ws[4]:
             self.assertEqual(cell.fill.patternType, "solid")
             self.assertTrue(cell.font.bold)
+
+    def test_guard_follows_header_below_one_row_per_general_requirement(self):
+        ws = self._build_full_ws(general_requirement_rows=7)
+        self.assertEqual(sd_report_writer.get_dm_verif_header_row(ws), 10)
+
+        self._apply_guard(ws, "DE - DM verif.")
+
+        for cell in ws[10]:
+            self.assertEqual(cell.fill.patternType, "solid")
+            self.assertTrue(cell.font.bold)
+        self.assertIsNone(ws.cell(row=4, column=1).fill.patternType)
 
 
 class TestDocumentationDataHardCopyAndHide(unittest.TestCase):

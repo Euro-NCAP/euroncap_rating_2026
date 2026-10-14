@@ -25,6 +25,7 @@ def add_verification_sheets_to_dfs(
     dfs: dict,
     acc_input_selected_points=None,
     dm_input_selected_points=None,
+    protocol=None,
 ) -> tuple:
     """Run SD preprocess for ACC Performance and Driver Monitoring and return updated dfs.
 
@@ -32,6 +33,8 @@ def add_verification_sheets_to_dfs(
         dfs: Dictionary of DataFrames loaded from parquets or Excel.
         acc_input_selected_points: Optional fixed test-point dict for ACC Performance.
         dm_input_selected_points: Optional fixed test-point dict for Driver Monitoring.
+        protocol: Rating protocol to score against; None reads the marker in
+            dfs["Version"] and falls back to Euro NCAP.
 
     Returns:
         Tuple of (acc_test_points, dm_test_points, updated_dfs) where updated_dfs is a
@@ -42,13 +45,15 @@ def add_verification_sheets_to_dfs(
     # it from the caller -- this is the dataframe-in/dataframe-out sibling
     # of preprocess()'s rebuild_trusted_input call, for callers that
     # only ever have DataFrames.
-    dfs = integrity.rebuild_trusted_input_dfs(dfs)
+    protocol = common.resolve_protocol(protocol, dfs=dfs)
+    dfs = integrity.rebuild_trusted_input_dfs(dfs, protocol=protocol)
 
     acc_test_points = test_info.preprocess_stage_subelement(
         dfs,
         "Vehicle Assistance",
         "ACC Performance",
         input_selected_points=acc_input_selected_points,
+        protocol=protocol,
     )
 
     dm_test_points = test_info.preprocess_stage_subelement(
@@ -88,6 +93,7 @@ def add_verification_sheets_to_dfs(
 def preprocess(input_file, output_path):
     """Select test points and generate loadcases from input Excel file."""
     common.check_version(input_file, common.CliCommand.GENERATE_TEMPLATE)
+    common.check_protocol(input_file)
     print(f"[Safe Driving] Preprocessing test points and generating loadcases...")
 
     # Re-derive a trusted copy of the input: every reference/structural cell

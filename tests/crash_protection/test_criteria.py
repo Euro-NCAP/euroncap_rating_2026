@@ -176,18 +176,40 @@ class TestCriteria(unittest.TestCase):
         criteria.calculate_color_score()
         self.assertEqual(criteria.score, 0.0)
 
-    def test_zero_switch_criteria_boundary_is_inclusive(self):
-        # Euro NCAP protocol documents the Backset pass condition as
-        # (ΔCP X) <= (ΔCP X)LIMIT, so a value exactly equal to the limit
-        # must PASS (green/100.0), not FAIL.
+    def _make_zero_switch(self, value, prediction=None):
         row = {
             "Criteria": "Backset - Mid",
             "HPL": 331.2,
             "LPL": 331.2,
-            "Value": 331.2,
+            "Value": value,
         }
-        criteria = Criteria.get_criteria_from_row(row)
+        if prediction is not None:
+            row["OEM Prediction"] = prediction
+        criteria = Criteria.get_criteria_from_row(pd.Series(row))
         self.assertEqual(criteria.criteria_type, CriteriaType.ZERO_SWITCH)
+        return criteria
+
+    def test_zero_switch_criteria_boundary_is_exclusive(self):
+        # A single pass/fail limit (HPL == LPL): a value exactly at the
+        # limit fails (red/0.0), like every other band criterion.
+        criteria = self._make_zero_switch(331.2)
+        self.assertEqual(criteria.color, "red")
+        self.assertEqual(criteria.score, 0.0)
+
+    def test_zero_switch_at_limit_green_prediction_is_incorrect(self):
+        criteria = self._make_zero_switch(331.2, prediction="Green")
+        self.assertEqual(criteria.prediction_result, "Incorrect")
+        self.assertEqual(criteria.color, "red")
+        self.assertEqual(criteria.score, 0.0)
+
+    def test_zero_switch_at_limit_red_prediction_is_correct(self):
+        criteria = self._make_zero_switch(331.2, prediction="Red")
+        self.assertEqual(criteria.prediction_result, "Correct")
+        self.assertEqual(criteria.color, "red")
+        self.assertEqual(criteria.score, 0.0)
+
+    def test_zero_switch_just_below_limit_is_green(self):
+        criteria = self._make_zero_switch(331.19)
         self.assertEqual(criteria.color, "green")
         self.assertEqual(criteria.score, 100.0)
 

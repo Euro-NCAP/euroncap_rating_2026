@@ -5,10 +5,13 @@
 # See http://www.apache.org/licenses/LICENSE-2.0 for details.
 
 import io
-from typing import Dict
+from dataclasses import dataclass
+from enum import Enum
+from typing import Dict, FrozenSet, Mapping, Optional, Tuple
 import numpy as np
 import pandas as pd
 from euroncap_rating_2026 import common
+from euroncap_rating_2026.numeric import round_half_up
 from euroncap_rating_2026.safe_driving import data_model
 import logging
 
@@ -17,7 +20,72 @@ logger = logging.getLogger(__name__)
 CONDITIONAL_SPEED_LIMIT_STR = "Conditional speed limits"
 IMPLICIT_SPEED_LIMIT_STR = "Implicit speed limits"
 DYNAMIC_SPEED_LIMIT_STR = "Dynamic speed limits"
-SLIF_ADV_MAPPING = {
+
+SLIF_ADVANCED_SPEED_LIMIT_CATEGORY = "SLIF - Advanced speed limit"
+
+
+class SlifAdvancedPassRule(str, Enum):
+    """How the per-market Green/Red predictions of one Advanced Speed Limits
+    column roll up into the scenario's PASS/FAIL."""
+
+    # Euro NCAP: no member-state Red / grey-N/A AND at least half of all
+    # application-area rows Green or blank.
+    TWO_TIER = "two_tier"
+    # Every market row must be Green (or blank / N/A): a single Red or
+    # grey-N/A row fails the scenario.
+    ALL_ROWS = "all_rows"
+
+
+@dataclass(frozen=True)
+class SpeedAssistanceProfile:
+    """Everything in Speed Assistance that differs between rating protocols.
+
+    Only SLIF -> Advanced Speed Limits (taxonomy, points, coupling, caps) and
+    the geometry of the 'VA - Speed assist. pred.' sheet vary; Accuracy,
+    Local Hazards, System updates and the Speed Control Function are shared
+    and stay in module-level code. The Euro NCAP profile is built in; another
+    programme's package registers its own with register_profile (see
+    common.register_protocol).
+    """
+
+    protocol: str
+    # Prediction-sheet column header -> category string, in sheet order.
+    slif_adv_mapping: Mapping[str, str]
+    # Scored scenario (verification-sheet row name) -> points, in verification
+    # row order. These are the canonical scenario strings consuming
+    # applications match by exact equality.
+    advanced_points: Mapping[str, float]
+    # Euro NCAP scores the three implicit columns as one all-or-nothing row.
+    collapse_implicit: bool
+    implicit_collapsed_scenario: Optional[str]
+    # (dependent scenario, prerequisite scenario): the dependent scores 0
+    # whenever the prerequisite scored 0.
+    coupling_rules: Tuple[Tuple[str, str], ...]
+    # (scenarios, cap): the summed points of *scenarios* count at most *cap*
+    # towards the category total (applied at Category Scores level, the raw
+    # per-scenario points stay -- same convention as Local Hazards).
+    sub_caps: Tuple[Tuple[FrozenSet[str], float], ...]
+    # Geometry of the prediction sheet as read by read_excel_file_to_dfs
+    # (0-based DataFrame rows; the sheet's first row is the header).
+    adv_table_n_rows: int
+    adv_table_n_cols: int
+    hazard_table_start_row: int
+    # Advanced Speed Limits grid rows and their first-column group label.
+    expected_row_count: int
+    group_label: str
+    expected_group_row_count: int
+    pass_rule: SlifAdvancedPassRule
+
+    @property
+    def advanced_scenarios(self) -> Tuple[str, ...]:
+        return tuple(self.advanced_points.keys())
+
+    @property
+    def verification_csv(self) -> str:
+        return build_slif_scoring_csv(self.advanced_scenarios)
+
+
+ENCAP_SLIF_ADV_MAPPING = {
     "Rain / Wetness": CONDITIONAL_SPEED_LIMIT_STR,
     "Snow / Icy": CONDITIONAL_SPEED_LIMIT_STR,
     "Time / Season": CONDITIONAL_SPEED_LIMIT_STR,
@@ -32,9 +100,141 @@ SLIF_ADV_MAPPING = {
     "Lane relevant": DYNAMIC_SPEED_LIMIT_STR,
 }
 
-EURO_NCAP_MEMBER_STATES_LABEL = "euro ncap member states"
-EXPECTED_MEMBER_STATE_ROW_COUNT = 10
-EXPECTED_APPLICATION_AREA_ROW_COUNT = 29
+ENCAP_IMPLICIT_COLLAPSED_SCENARIO = (
+    "Implicit speed limits - Highway, city and residential zones"
+)
+
+# Points are protocol constants (Euro NCAP Safe Driving - Vehicle Assistance
+# v1.2, section 1.2.2), not read from the template's 'Max score' column.
+ENCAP_ADVANCED_SPEED_LIMIT_POINTS = {
+    "Conditional speed limits - Rain / Wetness": 0.4,
+    "Conditional speed limits - Snow / Icy": 0.4,
+    "Conditional speed limits - Time / Season": 0.4,
+    "Conditional speed limits - Distance for / Distance in": 0.4,
+    "Conditional speed limits - Non-lane relevant arrows": 0.1,
+    "Conditional speed limits - Lane relevant arrows": 0.1,
+    "Conditional speed limits - Vehicle categories": 0.2,
+    ENCAP_IMPLICIT_COLLAPSED_SCENARIO: 0.5,
+    "Dynamic speed limits - Non-lane relevant": 0.25,
+    "Dynamic speed limits - Lane relevant": 0.25,
+}
+# The 10 canonical Euro NCAP scenario strings, matched by exact string
+# equality by consuming applications.
+ENCAP_ADVANCED_SPEED_LIMIT_SCENARIOS = tuple(ENCAP_ADVANCED_SPEED_LIMIT_POINTS)
+
+ENCAP_26_28_PROFILE = SpeedAssistanceProfile(
+    protocol=common.Protocol.ENCAP_26_28.value,
+    slif_adv_mapping=ENCAP_SLIF_ADV_MAPPING,
+    advanced_points=ENCAP_ADVANCED_SPEED_LIMIT_POINTS,
+    collapse_implicit=True,
+    implicit_collapsed_scenario=ENCAP_IMPLICIT_COLLAPSED_SCENARIO,
+    coupling_rules=(
+        (
+            "Conditional speed limits - Lane relevant arrows",
+            "Conditional speed limits - Non-lane relevant arrows",
+        ),
+        (
+            "Dynamic speed limits - Lane relevant",
+            "Dynamic speed limits - Non-lane relevant",
+        ),
+    ),
+    sub_caps=(),
+    adv_table_n_rows=30,
+    adv_table_n_cols=14,
+    hazard_table_start_row=31,
+    expected_row_count=29,
+    group_label="euro ncap member states",
+    expected_group_row_count=10,
+    pass_rule=SlifAdvancedPassRule.TWO_TIER,
+)
+
+# Registry: protocol id -> profile. Euro NCAP is built in; another
+# programme's package adds its own with register_profile at import time.
+PROFILES = {
+    ENCAP_26_28_PROFILE.protocol: ENCAP_26_28_PROFILE,
+}
+
+
+def register_profile(profile: SpeedAssistanceProfile) -> SpeedAssistanceProfile:
+    """Register *profile* for its protocol. The protocol must already be
+    registered (common.register_protocol); every scenario named by the
+    coupling rules and sub-caps must be one of the profile's own scenarios.
+    Registering the identical profile twice is a no-op; a different profile
+    under an existing protocol raises ValueError."""
+    protocol = common.normalize_protocol(profile.protocol)
+    scenarios = set(profile.advanced_scenarios)
+    referenced = {s for pair in profile.coupling_rules for s in pair}
+    referenced |= {s for group, _cap in profile.sub_caps for s in group}
+    unknown = sorted(referenced - scenarios)
+    if unknown:
+        raise ValueError(
+            f"Profile for '{protocol}' references scenarios it does not score: "
+            f"{unknown}"
+        )
+    if profile.collapse_implicit and not profile.implicit_collapsed_scenario:
+        raise ValueError(
+            f"Profile for '{protocol}' collapses implicit scenarios but names no "
+            "collapsed scenario."
+        )
+    # preprocess fills the verification row "<category> - <column header>"
+    # for every mapped column (the collapsed implicit row instead, when
+    # collapsing); compute_score awards advanced_points by those same row
+    # names. The two must agree exactly, or a scenario is silently left at 0.
+    emitted = set()
+    implicit_columns = 0
+    for header, category in profile.slif_adv_mapping.items():
+        if profile.collapse_implicit and category == IMPLICIT_SPEED_LIMIT_STR:
+            implicit_columns += 1
+            continue
+        emitted.add(f"{category} - {header}")
+    if profile.collapse_implicit:
+        if implicit_columns == 0:
+            raise ValueError(
+                f"Profile for '{protocol}' collapses implicit scenarios but maps "
+                "no implicit column."
+            )
+        emitted.add(profile.implicit_collapsed_scenario)
+    if emitted != scenarios:
+        raise ValueError(
+            f"Profile for '{protocol}': advanced_points and slif_adv_mapping "
+            f"disagree. Scored but never filled by preprocess: "
+            f"{sorted(scenarios - emitted)}; filled but never scored: "
+            f"{sorted(emitted - scenarios)}."
+        )
+    existing = PROFILES.get(protocol)
+    if existing is not None and existing != profile:
+        raise ValueError(
+            f"A Speed Assistance profile is already registered for '{protocol}'; "
+            "refusing to replace it."
+        )
+    PROFILES[protocol] = profile
+    return profile
+
+
+def get_profile(protocol=None) -> SpeedAssistanceProfile:
+    """The SpeedAssistanceProfile for *protocol* (see common.normalize_protocol;
+    None means Euro NCAP). Raises ValueError for a registered protocol whose
+    package registered no Speed Assistance profile."""
+    protocol = common.normalize_protocol(protocol)
+    try:
+        return PROFILES[protocol]
+    except KeyError:
+        raise ValueError(
+            f"No Speed Assistance profile is registered for protocol '{protocol}'."
+        ) from None
+
+
+def resolve_profile(protocol=None, dfs: dict = None) -> SpeedAssistanceProfile:
+    """Profile for an explicit *protocol*, else for the protocol recorded in
+    *dfs*' Version sheet, else Euro NCAP (common.resolve_protocol)."""
+    return get_profile(common.resolve_protocol(protocol, dfs=dfs))
+
+
+# Euro NCAP values kept under their historical names for existing importers.
+SLIF_ADV_MAPPING = ENCAP_SLIF_ADV_MAPPING
+EURO_NCAP_MEMBER_STATES_LABEL = ENCAP_26_28_PROFILE.group_label
+EXPECTED_MEMBER_STATE_ROW_COUNT = ENCAP_26_28_PROFILE.expected_group_row_count
+EXPECTED_APPLICATION_AREA_ROW_COUNT = ENCAP_26_28_PROFILE.expected_row_count
 
 LOCAL_HAZARD_COLUMNS = [
     "Construction zones",
@@ -77,41 +277,54 @@ LOCAL_HAZARD_POINTS = {
 LOCAL_HAZARD_CAP_BOTH_CHANNELS = 3.0
 LOCAL_HAZARD_CAP_SINGLE_CHANNEL = 2.5
 
-SLIF_SCORING_CSV_STRING = """
-Category;Scenario;Value
-SLIF - General requirements;;
-SLIF - Accuracy;Distance based KPI;
-SLIF - Accuracy;Event based KPI;
-SLIF - Advanced speed limit;Conditional speed limits - Rain / Wetness;FAIL
-SLIF - Advanced speed limit;Conditional speed limits - Snow / Icy;FAIL
-SLIF - Advanced speed limit;Conditional speed limits - Time / Season;FAIL
-SLIF - Advanced speed limit;Conditional speed limits - Distance for / Distance in;FAIL
-SLIF - Advanced speed limit;Conditional speed limits - Non-lane relevant arrows;FAIL
-SLIF - Advanced speed limit;Conditional speed limits - Lane relevant arrows;FAIL
-SLIF - Advanced speed limit;Conditional speed limits - Vehicle categories;FAIL
-SLIF - Advanced speed limit;Implicit speed limits - Highway, city and residential zones;FAIL
-SLIF - Advanced speed limit;Dynamic speed limits - Non-lane relevant;FAIL
-SLIF - Advanced speed limit;Dynamic speed limits - Lane relevant;FAIL
-SLIF - Local hazards;Construction zones - Sending;FAIL
-SLIF - Local hazards;Construction zones - Receiving & informing;FAIL
-SLIF - Local hazards;Items on road - Sending;FAIL
-SLIF - Local hazards;Items on road - Receiving & informing;FAIL
-SLIF - Local hazards;Stopped vehicle - Sending;FAIL
-SLIF - Local hazards;Stopped vehicle - Receiving & informing;FAIL
-SLIF - Local hazards;Broken down vehicle - Sending;FAIL
-SLIF - Local hazards;Broken down vehicle - Receiving & informing;FAIL
-SLIF - Local hazards;Post crash - Sending;FAIL
-SLIF - Local hazards;Post crash - Receiving & informing;FAIL
-SLIF - Local hazards;Poor weather - Sending;FAIL
-SLIF - Local hazards;Poor weather - Receiving & informing;FAIL
-SLIF - Local hazards;Poor road - Sending;FAIL
-SLIF - Local hazards;Poor road - Receiving & informing;FAIL
-SLIF - Local hazards;Wrong way driver - Sending;FAIL
-SLIF - Local hazards;Wrong way driver - Receiving & informing;FAIL
-SLIF - Local hazards;Amber & blue lights - Receiving & informing;FAIL
-SLIF - Local hazards;Traffic jam - Receiving & informing;FAIL
-Speed control function;Speedometer accuracy;≥-3 km/h
-"""
+SLIF_LOCAL_HAZARD_VERIFICATION_ROWS = (
+    "Construction zones - Sending",
+    "Construction zones - Receiving & informing",
+    "Items on road - Sending",
+    "Items on road - Receiving & informing",
+    "Stopped vehicle - Sending",
+    "Stopped vehicle - Receiving & informing",
+    "Broken down vehicle - Sending",
+    "Broken down vehicle - Receiving & informing",
+    "Post crash - Sending",
+    "Post crash - Receiving & informing",
+    "Poor weather - Sending",
+    "Poor weather - Receiving & informing",
+    "Poor road - Sending",
+    "Poor road - Receiving & informing",
+    "Wrong way driver - Sending",
+    "Wrong way driver - Receiving & informing",
+    "Amber & blue lights - Receiving & informing",
+    "Traffic jam - Receiving & informing",
+)
+
+
+def build_slif_scoring_csv(advanced_scenarios) -> str:
+    """The 'VA - Speed assist. verif.' skeleton as a ';'-separated CSV string:
+    General requirements, Accuracy, one 'SLIF - Advanced speed limit' row per
+    scenario in *advanced_scenarios*, Local hazards, Speedometer accuracy."""
+    lines = [
+        "",
+        "Category;Scenario;Value",
+        "SLIF - General requirements;;",
+        "SLIF - Accuracy;Distance based KPI;",
+        "SLIF - Accuracy;Event based KPI;",
+    ]
+    lines.extend(
+        f"{SLIF_ADVANCED_SPEED_LIMIT_CATEGORY};{scenario};FAIL"
+        for scenario in advanced_scenarios
+    )
+    lines.extend(
+        f"SLIF - Local hazards;{scenario};FAIL"
+        for scenario in SLIF_LOCAL_HAZARD_VERIFICATION_ROWS
+    )
+    lines.append("Speed control function;Speedometer accuracy;≥-3 km/h")
+    lines.append("")
+    return "\n".join(lines)
+
+
+# Euro NCAP verification skeleton, kept under its historical name.
+SLIF_SCORING_CSV_STRING = ENCAP_26_28_PROFILE.verification_csv
 
 ISL_ROW = """
 Category;Scenario;Value
@@ -125,9 +338,14 @@ Speed control function;Intelligent adaptive cruise control;PASS
 
 def get_slif_advanced_speed_limit_table(
     sas_prediction_df: pd.DataFrame,
+    profile: SpeedAssistanceProfile = ENCAP_26_28_PROFILE,
 ) -> pd.DataFrame:
     slif_adv_table = common.extract_sub_table(
-        sas_prediction_df, start_row=0, n_rows=30, start_col=0, n_cols=14
+        sas_prediction_df,
+        start_row=0,
+        n_rows=profile.adv_table_n_rows,
+        start_col=0,
+        n_cols=profile.adv_table_n_cols,
     )
     slif_adv_table.columns = slif_adv_table.iloc[0]
     slif_adv_table = slif_adv_table[1:].reset_index(drop=True)
@@ -142,10 +360,16 @@ def get_slif_advanced_speed_limit_table(
 
 
 def get_slif_advanced_speed_limit_bg_table(
-    sas_prediction_bg_df: pd.DataFrame, columns
+    sas_prediction_bg_df: pd.DataFrame,
+    columns,
+    profile: SpeedAssistanceProfile = ENCAP_26_28_PROFILE,
 ) -> pd.DataFrame:
     slif_adv_bg_table = common.extract_sub_table(
-        sas_prediction_bg_df, start_row=0, n_rows=30, start_col=0, n_cols=14
+        sas_prediction_bg_df,
+        start_row=0,
+        n_rows=profile.adv_table_n_rows,
+        start_col=0,
+        n_cols=profile.adv_table_n_cols,
     )
     # Unlike the text table, the bg table's own sub-header row (scenario
     # names) carries no fill color, so it can't supply column labels itself.
@@ -157,9 +381,16 @@ def get_slif_advanced_speed_limit_bg_table(
     return slif_adv_bg_table
 
 
-def get_local_hazard_table(sas_prediction_df: pd.DataFrame) -> pd.DataFrame:
+def get_local_hazard_table(
+    sas_prediction_df: pd.DataFrame,
+    profile: SpeedAssistanceProfile = ENCAP_26_28_PROFILE,
+) -> pd.DataFrame:
     slif_local_hazards_table = common.extract_sub_table(
-        sas_prediction_df, start_row=31, n_rows=6, start_col=0, n_cols=12
+        sas_prediction_df,
+        start_row=profile.hazard_table_start_row,
+        n_rows=6,
+        start_col=0,
+        n_cols=12,
     )
     slif_local_hazards_table.columns = slif_local_hazards_table.iloc[0]
     slif_local_hazards_table = slif_local_hazards_table[1:].reset_index(drop=True)
@@ -297,43 +528,60 @@ def update_scenario_scores_with_system_updates_row(
     return scenario_scores_df
 
 
-def preprocess(dfs: dict[str, pd.DataFrame]) -> Dict:
-    logger.info("Preprocess SAS ...")
-    slif_verification_df = pd.read_csv(io.StringIO(SLIF_SCORING_CSV_STRING), sep=";")
+def preprocess(dfs: dict[str, pd.DataFrame], protocol=None) -> Dict:
+    """Derive the 'VA - Speed assist. verif.' skeleton from the prediction
+    sheet. *protocol* selects the SpeedAssistanceProfile; None reads the
+    marker in dfs["Version"] and falls back to Euro NCAP
+    (common.resolve_protocol)."""
+    profile = resolve_profile(protocol, dfs)
+    logger.info(f"Preprocess SAS ({profile.protocol}) ...")
+    slif_verification_df = pd.read_csv(io.StringIO(profile.verification_csv), sep=";")
     sas_prediction_df = dfs.get("VA - Speed assist. pred.")
     sas_prediction_bg_df = dfs.get("VA - Speed assist. pred. (bg)")
 
-    slif_adv_table = get_slif_advanced_speed_limit_table(sas_prediction_df)
+    slif_adv_table = get_slif_advanced_speed_limit_table(sas_prediction_df, profile)
     slif_adv_bg_table = (
         get_slif_advanced_speed_limit_bg_table(
-            sas_prediction_bg_df, slif_adv_table.columns
+            sas_prediction_bg_df, slif_adv_table.columns, profile
         )
         if sas_prediction_bg_df is not None
         else None
     )
 
     total_country_count = len(slif_adv_table)
-    if total_country_count != EXPECTED_APPLICATION_AREA_ROW_COUNT:
+    if total_country_count != profile.expected_row_count:
         raise ValueError(
-            f"Expected {EXPECTED_APPLICATION_AREA_ROW_COUNT} country rows in the SLIF "
-            f"advanced speed limit table, found {total_country_count}. The "
-            "'VA - Speed assist. pred.' sheet layout may have changed."
+            f"Expected {profile.expected_row_count} country rows in the SLIF "
+            f"advanced speed limit table for protocol '{profile.protocol}', found "
+            f"{total_country_count}. The 'VA - Speed assist. pred.' sheet layout "
+            "may have changed, or the file was generated for a different protocol."
         )
 
     member_state_mask = (
         slif_adv_table.iloc[:, 0].map(lambda v: str(v).strip().lower())
-        == EURO_NCAP_MEMBER_STATES_LABEL
+        == profile.group_label.strip().lower()
     )
-    if member_state_mask.sum() != EXPECTED_MEMBER_STATE_ROW_COUNT:
+    if member_state_mask.sum() != profile.expected_group_row_count:
         raise ValueError(
-            f"Expected {EXPECTED_MEMBER_STATE_ROW_COUNT} 'Euro NCAP member states' rows "
-            f"in the SLIF advanced speed limit table, found {member_state_mask.sum()}. "
-            "The 'VA - Speed assist. pred.' sheet layout may have changed."
+            f"Expected {profile.expected_group_row_count} '{profile.group_label}' "
+            f"rows in the SLIF advanced speed limit table, found "
+            f"{member_state_mask.sum()}. The 'VA - Speed assist. pred.' sheet "
+            "layout may have changed."
+        )
+
+    missing_headers = [
+        key for key in profile.slif_adv_mapping if key not in slif_adv_table.columns
+    ]
+    if missing_headers:
+        raise ValueError(
+            f"Advanced speed limit columns {missing_headers} are missing from the "
+            f"'VA - Speed assist. pred.' sheet for protocol '{profile.protocol}'. "
+            "The file may have been generated for a different protocol."
         )
 
     implicit_scenario_status_list = []
 
-    for slif_adv_key, scenario_str in SLIF_ADV_MAPPING.items():
+    for slif_adv_key, scenario_str in profile.slif_adv_mapping.items():
         current_text_col = slif_adv_table[slif_adv_key]
         current_bg_col = (
             slif_adv_bg_table[slif_adv_key] if slif_adv_bg_table is not None else None
@@ -346,6 +594,15 @@ def preprocess(dfs: dict[str, pd.DataFrame]) -> Dict:
                 return "GREEN"
             if norm == "red":
                 return "RED"
+            # Any other text (pasted or written programmatically, bypassing
+            # the Green/Red dropdown) is not a blank N/A: it fails the row.
+            # Empty cells arrive here as "N/A" (fillna above).
+            if not common.is_empty_cell(norm) and norm not in ("n/a", "-"):
+                logger.warning(
+                    f"Unexpected SLIF prediction '{current_text_col.iloc[idx]}' in "
+                    f"column '{slif_adv_key}', row {idx}: treated as failing."
+                )
+                return "INVALID"
             # Blank text: distinguish truly-blank (white/no-fill) from an
             # explicit grey/other manual fill, which the sheet's Green/Red-only
             # dropdown can't express as text.
@@ -360,33 +617,52 @@ def preprocess(dfs: dict[str, pd.DataFrame]) -> Dict:
             return "BLANK"
 
         classified = [classify(i) for i in range(total_country_count)]
-        member_classified = [
-            c for c, is_member in zip(classified, member_state_mask) if is_member
-        ]
         logger.debug(
             f"Processing SLIF prediction column '{slif_adv_key}' for scenario '{scenario_str}' with values:\n{classified}"
         )
 
-        member_states_pass = not any(c in ("RED", "GREY_NA") for c in member_classified)
-        green_or_blank_count = sum(c in ("GREEN", "BLANK") for c in classified)
-        application_area_pass = green_or_blank_count >= (total_country_count / 2)
-
-        if member_states_pass and application_area_pass:
-            scenario_status = "PASS"
-            logger.debug(
-                f"Setting scenario '{scenario_full_name}' to PASS: no member-state "
-                f"Red/N-A, and {green_or_blank_count}/{total_country_count} application-area "
-                "countries are Green or blank."
-            )
+        if profile.pass_rule == SlifAdvancedPassRule.ALL_ROWS:
+            # Every market row must be Green or blank (N/A): a single Red,
+            # grey-N/A or unknown-text market fails the scenario.
+            failing_rows = [c for c in classified if c in ("RED", "GREY_NA", "INVALID")]
+            if not failing_rows:
+                scenario_status = "PASS"
+                logger.debug(
+                    f"Setting scenario '{scenario_full_name}' to PASS: no market "
+                    "row is Red/N-A."
+                )
+            else:
+                scenario_status = "FAIL"
+                logger.debug(
+                    f"Setting scenario '{scenario_full_name}' to FAIL: "
+                    f"{len(failing_rows)}/{total_country_count} market rows are Red/N-A."
+                )
         else:
-            scenario_status = "FAIL"
-            logger.debug(
-                f"Setting scenario '{scenario_full_name}' to FAIL: member_states_pass="
-                f"{member_states_pass}, application_area_pass={application_area_pass} "
-                f"({green_or_blank_count}/{total_country_count})."
+            member_classified = [
+                c for c, is_member in zip(classified, member_state_mask) if is_member
+            ]
+            member_states_pass = not any(
+                c in ("RED", "GREY_NA", "INVALID") for c in member_classified
             )
+            green_or_blank_count = sum(c in ("GREEN", "BLANK") for c in classified)
+            application_area_pass = green_or_blank_count >= (total_country_count / 2)
 
-        if scenario_str == IMPLICIT_SPEED_LIMIT_STR:
+            if member_states_pass and application_area_pass:
+                scenario_status = "PASS"
+                logger.debug(
+                    f"Setting scenario '{scenario_full_name}' to PASS: no member-state "
+                    f"Red/N-A, and {green_or_blank_count}/{total_country_count} application-area "
+                    "countries are Green or blank."
+                )
+            else:
+                scenario_status = "FAIL"
+                logger.debug(
+                    f"Setting scenario '{scenario_full_name}' to FAIL: member_states_pass="
+                    f"{member_states_pass}, application_area_pass={application_area_pass} "
+                    f"({green_or_blank_count}/{total_country_count})."
+                )
+
+        if profile.collapse_implicit and scenario_str == IMPLICIT_SPEED_LIMIT_STR:
             implicit_scenario_status_list.append(scenario_status)
             continue
 
@@ -395,22 +671,22 @@ def preprocess(dfs: dict[str, pd.DataFrame]) -> Dict:
             "Value",
         ] = scenario_status
 
-    implicit_final_status = (
-        "PASS"
-        if all(status == "PASS" for status in implicit_scenario_status_list)
-        else "FAIL"
-    )
+    if profile.collapse_implicit:
+        implicit_final_status = (
+            "PASS"
+            if all(status == "PASS" for status in implicit_scenario_status_list)
+            else "FAIL"
+        )
 
-    slif_verification_df.loc[
-        slif_verification_df["Scenario"]
-        == "Implicit speed limits - Highway, city and residential zones",
-        "Value",
-    ] = implicit_final_status
-    logger.debug(
-        f"Final status for 'Implicit speed limits - Highway, city and residential zones': {implicit_final_status}"
-    )
+        slif_verification_df.loc[
+            slif_verification_df["Scenario"] == profile.implicit_collapsed_scenario,
+            "Value",
+        ] = implicit_final_status
+        logger.debug(
+            f"Final status for '{profile.implicit_collapsed_scenario}': {implicit_final_status}"
+        )
 
-    slif_local_hazards_table = get_local_hazard_table(sas_prediction_df)
+    slif_local_hazards_table = get_local_hazard_table(sas_prediction_df, profile)
     logger.debug(
         f"Processing SLIF Local Hazards predictions for scenarios starting with 'SLIF - Local Hazards' with values:\n{slif_local_hazards_table}"
     )
@@ -510,25 +786,97 @@ def preprocess(dfs: dict[str, pd.DataFrame]) -> Dict:
     return slif_verification_df, scenario_scores_df
 
 
-def compute_score(dfs: dict[str, pd.DataFrame]) -> Dict:
-    logger.info("Computing SAS prediction score...")
+def apply_advanced_speed_limit_sub_caps(
+    category_scores_df: pd.DataFrame,
+    scenario_scores_df: pd.DataFrame,
+    profile: SpeedAssistanceProfile = None,
+    protocol=None,
+    dfs: dict = None,
+) -> pd.DataFrame:
+    """Apply the profile's Advanced Speed Limits sub-caps (a programme may cap
+    the summed points of a scenario group) to the 'SLIF - Advanced speed
+    limit' row of *category_scores_df*, after the category has been summed
+    from *scenario_scores_df*.
+
+    Mirrors the Local Hazards cap: the raw per-scenario points are left as
+    they are, only the category total is reduced, by the amount the capped
+    group's summed scenario scores exceed its cap. An unassessed (NaN)
+    scenario in the group leaves the (already NaN) category untouched. A
+    profile without sub-caps (Euro NCAP) is a no-op.
+
+    *profile* wins over *protocol*, which wins over the marker in *dfs*.
+    """
+    if profile is None:
+        profile = resolve_profile(protocol, dfs)
+    if not profile.sub_caps:
+        return category_scores_df
+    if (
+        category_scores_df is None
+        or category_scores_df.empty
+        or "Category" not in category_scores_df.columns
+        or scenario_scores_df is None
+        or scenario_scores_df.empty
+        or "Scenario" not in scenario_scores_df.columns
+    ):
+        return category_scores_df
+
+    category_mask = (
+        category_scores_df["Category"].astype(str).str.strip()
+        == SLIF_ADVANCED_SPEED_LIMIT_CATEGORY
+    )
+    if not category_mask.any():
+        logger.warning(
+            f"No '{SLIF_ADVANCED_SPEED_LIMIT_CATEGORY}' row in Category Scores; "
+            "sub-caps not applied."
+        )
+        return category_scores_df
+    category_idx = category_scores_df.index[category_mask][0]
+    category_score = pd.to_numeric(
+        pd.Series([category_scores_df.at[category_idx, "Score"]]), errors="coerce"
+    ).iloc[0]
+    if pd.isna(category_score):
+        return category_scores_df
+
+    scenario_scores = pd.to_numeric(scenario_scores_df["Score"], errors="coerce")
+    scenario_names = scenario_scores_df["Scenario"].astype(str).str.strip()
+    for scenarios, cap in profile.sub_caps:
+        group_scores = scenario_scores[scenario_names.isin(scenarios)]
+        if group_scores.empty or group_scores.isna().any():
+            continue
+        excess = group_scores.sum() - cap
+        if excess <= 0:
+            continue
+        # 0.075-point steps are not exactly representable; round the
+        # adjusted total to the protocol's decimal precision, half-up.
+        capped = round_half_up(category_score - excess, 6)
+        logger.info(
+            f"Advanced speed limit sub-cap: {len(group_scores)} capped scenarios "
+            f"sum to {group_scores.sum():.3f} > {cap}; category score "
+            f"{category_score:.3f} -> {capped:.3f}"
+        )
+        category_scores_df.loc[category_idx, "Score"] = capped
+        category_score = capped
+    return category_scores_df
+
+
+def compute_score(dfs: dict[str, pd.DataFrame], protocol=None) -> Dict:
+    """Score Speed Assistance from the preprocessed verification/prediction
+    sheets. *protocol* selects the SpeedAssistanceProfile; None reads the
+    marker in dfs["Version"] and falls back to Euro NCAP.
+
+    Returns (verification_df, scenario_scores_df, slif_score_dict,
+    hazard_capping_score); the Advanced Speed Limits sub-caps are applied
+    separately, at Category Scores level, by
+    apply_advanced_speed_limit_sub_caps.
+    """
+    profile = resolve_profile(protocol, dfs)
+    logger.info(f"Computing SAS prediction score ({profile.protocol})...")
     scenario_scores_df = dfs.get("Scenario Scores", pd.DataFrame())
     accuracy_score_dict = {
         "Distance based": 0.0,
         "Event based": 0.0,
     }
-    advanced_score_dict = {
-        "Conditional speed limits - Rain / Wetness": 0.0,
-        "Conditional speed limits - Snow / Icy": 0.0,
-        "Conditional speed limits - Time / Season": 0.0,
-        "Conditional speed limits - Distance for / Distance in": 0.0,
-        "Conditional speed limits - Non-lane relevant arrows": 0.0,
-        "Conditional speed limits - Lane relevant arrows": 0.0,
-        "Conditional speed limits - Vehicle categories": 0.0,
-        "Implicit speed limits - Highway, city and residential zones": 0.0,
-        "Dynamic speed limits - Non-lane relevant": 0.0,
-        "Dynamic speed limits - Lane relevant": 0.0,
-    }
+    advanced_score_dict = {scenario: 0.0 for scenario in profile.advanced_scenarios}
 
     hazard_score_dict = {
         "Construction zones - Sending": 0.0,
@@ -606,6 +954,15 @@ def compute_score(dfs: dict[str, pd.DataFrame]) -> Dict:
     # If any general requirement failed, return score dict with all zeros
     if general_req_state == "fail":
         logger.info("One or more General requirements failed. Keeping score to 0.")
+        # System updates is scored on the Scenario Scores row (step 6), not
+        # through slif_score_dict, so zero it here too -- otherwise it stays
+        # unassessed, or keeps points stamped by an earlier calculation.
+        if "Category" in scenario_scores_df.columns:
+            system_updates_mask = (
+                scenario_scores_df["Category"].astype(str).str.strip().str.lower()
+                == "slif - system updates"
+            )
+            scenario_scores_df.loc[system_updates_mask, "Score"] = 0.0
         return sas_verification_df, scenario_scores_df, slif_score_dict, 0.0
 
     ####### 3. SLIF Accuracy scoring
@@ -664,19 +1021,9 @@ def compute_score(dfs: dict[str, pd.DataFrame]) -> Dict:
     )
 
     ####### 4. Conditional Speed Limits scoring
-    # Read specified columns from sas_prediction_df
-    slif_adv_max_scores_dict = {
-        "Conditional speed limits - Rain / Wetness": 0.4,
-        "Conditional speed limits - Snow / Icy": 0.4,
-        "Conditional speed limits - Time / Season": 0.4,
-        "Conditional speed limits - Distance for / Distance in": 0.4,
-        "Conditional speed limits - Non-lane relevant arrows": 0.1,
-        "Conditional speed limits - Lane relevant arrows": 0.1,
-        "Conditional speed limits - Vehicle categories": 0.2,
-        "Implicit speed limits - Highway, city and residential zones": 0.5,
-        "Dynamic speed limits - Non-lane relevant": 0.25,
-        "Dynamic speed limits - Lane relevant": 0.25,
-    }
+    # Points are protocol constants carried by the profile, not read from
+    # the template's 'Max score' column.
+    slif_adv_max_scores_dict = dict(profile.advanced_points)
 
     for full_scenario_name in slif_adv_max_scores_dict.keys():
 
@@ -705,27 +1052,15 @@ def compute_score(dfs: dict[str, pd.DataFrame]) -> Dict:
                 f"Scenario '{full_scenario_name}' did not pass. Score remains 0."
             )
 
-    # If Conditional speed limits - Non-lane relevant arrows is 0, set Lane relevant arrows to 0
-    if (
-        advanced_score_dict["Conditional speed limits - Non-lane relevant arrows"]
-        == 0.0
-    ):
-        advanced_score_dict["Conditional speed limits - Lane relevant arrows"] = 0.0
-        sas_verification_df.loc[
-            (
-                sas_verification_df["Scenario"]
-                == "Conditional speed limits - Lane relevant arrows"
-            ),
-            "Score",
-        ] = 0.0
-
-    # If Dynamic speed limits - Non-lane relevant is 0, set Lane relevant to 0
-    if advanced_score_dict["Dynamic speed limits - Non-lane relevant"] == 0.0:
-        advanced_score_dict["Dynamic speed limits - Lane relevant"] = 0.0
-        sas_verification_df.loc[
-            (sas_verification_df["Scenario"] == "Dynamic speed limits - Lane relevant"),
-            "Score",
-        ] = 0.0
+    # Coupled pairs (Euro NCAP arrows / dynamic): the dependent half scores 0
+    # whenever its prerequisite scored 0.
+    for dependent_scenario, prerequisite_scenario in profile.coupling_rules:
+        if advanced_score_dict[prerequisite_scenario] == 0.0:
+            advanced_score_dict[dependent_scenario] = 0.0
+            sas_verification_df.loc[
+                (sas_verification_df["Scenario"] == dependent_scenario),
+                "Score",
+            ] = 0.0
 
     ####### 5. Local Hazards scoring
     # The PASS/FAIL gate is unchanged: a hazard/direction passes as soon as either
@@ -734,7 +1069,7 @@ def compute_score(dfs: dict[str, pd.DataFrame]) -> Dict:
     # 'Direct AND Cloud' scores the full points, 'Direct OR Cloud' the reduced
     # ones, per protocol section 1.2.3. The 'Max score' columns of the
     # verification and scoring sheets are never modified - only 'Score' changes.
-    slif_local_hazards_table = get_local_hazard_table(sas_prediction_df)
+    slif_local_hazards_table = get_local_hazard_table(sas_prediction_df, profile)
     hazard_channel_status = get_local_hazard_channel_status(slif_local_hazards_table)
 
     # Tracks whether any hazard/direction is missing one of the two communication

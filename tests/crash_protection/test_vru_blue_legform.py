@@ -8,7 +8,7 @@
 
 Features under test
 -------------------
-1. check_legform_blue_symmetry   – preprocess consistency check
+1. process_legform_test          – accepts asymmetric T/ST/SA patterns
 2. select_blue_pattern           – SA→ST coin-flip promotion (rows 0/1/2)
 3. _parse_test_point             – "(row, col)" string parser
 4. _resolve_legform_blue_values  – value inference for T / ST / SA criteria
@@ -39,7 +39,6 @@ from euroncap_rating_2026.crash_protection.vru_processing import (
     VruTestData,
     _parse_test_point,
     _resolve_legform_blue_values,
-    check_legform_blue_symmetry,
     get_legform_matrix,
     process_legform_criteria,
     process_legform_vru_loadcases,
@@ -127,129 +126,15 @@ class TestParseTestPoint(unittest.TestCase):
 
 
 # ===========================================================================
-# 2 – check_legform_blue_symmetry
-# ===========================================================================
-
-
-class TestCheckLegformBlueSymmetry(unittest.TestCase):
-    """
-    5-column matrix: col_center=2, col[j] = 2-j
-      j=0 col= 2  ↔  j=4 col=-2
-      j=1 col= 1  ↔  j=3 col=-1
-      j=2 col= 0        (self-symmetric)
-    """
-
-    # ------------------------------------------------------------------
-    # Valid matrices – must NOT raise
-    # ------------------------------------------------------------------
-
-    def test_all_grey_passes(self):
-        m = _make_matrix([[G, G, G, G, G]] * 3)
-        check_legform_blue_symmetry(m)  # should not raise
-
-    def test_t_symmetric_t_passes(self):
-        m = _make_matrix([[T, G, G, G, T], [G, G, G, G, G], [G, G, G, G, G]])
-        check_legform_blue_symmetry(m)
-
-    def test_t_symmetric_st_passes(self):
-        # T/ST at mirror positions both count as valid
-        m = _make_matrix([[T, G, G, G, ST], [G, G, G, G, G], [G, G, G, G, G]])
-        check_legform_blue_symmetry(m)
-
-    def test_st_symmetric_st_passes(self):
-        m = _make_matrix([[ST, G, G, G, ST], [G, G, G, G, G], [G, G, G, G, G]])
-        check_legform_blue_symmetry(m)
-
-    def test_sa_symmetric_sa_passes(self):
-        m = _make_matrix([[SA, G, G, G, SA], [G, G, G, G, G], [G, G, G, G, G]])
-        check_legform_blue_symmetry(m)
-
-    def test_t_at_center_col0_passes(self):
-        # j=2 → col=0; symmetric maps to j_sym=2 (self) which IS T → valid
-        m = _make_matrix([[G, G, T, G, G], [G, G, G, G, G], [G, G, G, G, G]])
-        check_legform_blue_symmetry(m)
-
-    def test_st_at_center_col0_passes(self):
-        m = _make_matrix([[G, G, ST, G, G], [G, G, G, G, G], [G, G, G, G, G]])
-        check_legform_blue_symmetry(m)
-
-    def test_multiple_rows_all_valid(self):
-        row = [SA, T, G, ST, SA]
-        m = _make_matrix([row, row, row])
-        check_legform_blue_symmetry(m)
-
-    def test_full_symmetric_mixed_row(self):
-        # j0=SA, j1=T, j2=grey, j3=ST, j4=SA
-        m = _make_matrix([[SA, T, G, ST, SA]])
-        check_legform_blue_symmetry(m)
-
-    # ------------------------------------------------------------------
-    # Invalid matrices – must raise ValueError
-    # ------------------------------------------------------------------
-
-    def test_t_without_symmetric_raises(self):
-        # T at j=0 (col=2), symmetric j=4 is GREY
-        m = _make_matrix([[T, G, G, G, G]])
-        with self.assertRaises(ValueError) as ctx:
-            check_legform_blue_symmetry(m)
-        self.assertIn("col=2", str(ctx.exception))
-
-    def test_t_with_sa_symmetric_raises(self):
-        m = _make_matrix([[T, G, G, G, SA]])
-        with self.assertRaises(ValueError):
-            check_legform_blue_symmetry(m)
-
-    def test_st_without_symmetric_raises(self):
-        m = _make_matrix([[ST, G, G, G, G]])
-        with self.assertRaises(ValueError):
-            check_legform_blue_symmetry(m)
-
-    def test_sa_at_col0_is_allowed(self):
-        # SA at col=0 maps to j_sym=j (self-symmetric). Its own color is SA == SA,
-        # so the check passes. The code intentionally allows this case.
-        m = _make_matrix([[G, G, SA, G, G]])
-        check_legform_blue_symmetry(m)  # must NOT raise
-
-    def test_sa_without_symmetric_raises(self):
-        # SA at j=0 (col=2), symmetric j=4 is GREY
-        m = _make_matrix([[SA, G, G, G, G]])
-        with self.assertRaises(ValueError):
-            check_legform_blue_symmetry(m)
-
-    def test_sa_with_t_symmetric_raises(self):
-        # SA at j=0, symmetric j=4 is T (not SA)
-        m = _make_matrix([[SA, G, G, G, T]])
-        with self.assertRaises(ValueError) as ctx:
-            check_legform_blue_symmetry(m)
-        self.assertIn("expected SA", str(ctx.exception))
-
-    def test_invalid_in_row1_raises(self):
-        # Row 0 valid, row 1 invalid
-        valid_row = [SA, G, G, G, SA]
-        bad_row = [T, G, G, G, G]
-        m = _make_matrix([valid_row, bad_row, [G, G, G, G, G]])
-        with self.assertRaises(ValueError):
-            check_legform_blue_symmetry(m)
-
-    def test_error_message_contains_row_and_col(self):
-        m = _make_matrix([[T, G, G, G, G]])
-        with self.assertRaises(ValueError) as ctx:
-            check_legform_blue_symmetry(m)
-        msg = str(ctx.exception)
-        self.assertIn("row=0", msg)
-        self.assertIn("j=0", msg)
-
-
-# ===========================================================================
 # 3 – select_blue_pattern SA→ST promotion
 # ===========================================================================
 
 
 class TestSelectBluePatternSAPromotion(unittest.TestCase):
     """
-    5-column rows.  valid_cols are all 5 indices when no grey is present.
-    coin=0 → selected indices 0, 2, 4  (even in enumerate)
-    coin=1 → selected indices 1, 3
+    5-column rows, centre index 2, signed col = 2 - j.
+    coin=0 (L0/U0, even signed cols) → indices 0, 2, 4
+    coin=1 (L1/U1, odd signed cols)  → indices 1, 3
     """
 
     def _all_sa_matrix(self, nrows=1, ncols=5):
@@ -354,19 +239,39 @@ class TestSelectBluePatternSAPromotion(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_grey_cells_inside_range_are_skipped(self):
-        # j: 0=SA, 1=G, 2=SA, 3=G, 4=SA  →  valid_cols=[0,2,4]
-        # coin=0: enumerate([0,2,4]) selects idx%2==0 → indices 0,2 → cols {0,4}
+        # j: 0=SA, 1=G, 2=SA, 3=G, 4=SA  →  valid_cols=[0,2,4]; every SA sits on
+        # an even signed column (+2, 0, -2). Greys are never touched or returned.
         row = [SA, G, SA, G, SA]
-        m = _make_matrix([row])
-        with patch("random.randint", return_value=0):
-            result = select_blue_pattern(0, m)
-        # All 3 blue cells must be returned (greenfield, all orphaned); only cols
-        # 0 and 4 are promoted to ST by the coin, col 2 stays SA.
-        result_cols = {col for _, col, _ in result}
-        self.assertEqual(result_cols, {0, 2, 4})
-        self.assertEqual(m[0][0], ST)
-        self.assertEqual(m[0][4], ST)
-        self.assertEqual(m[0][2], SA)
+        for coin, promoted in ((0, {0, 2, 4}), (1, set())):
+            with self.subTest(coin=coin):
+                m = _make_matrix([row])
+                with patch("random.randint", return_value=coin):
+                    result = select_blue_pattern(0, m)
+                self.assertEqual({col for _, col, _ in result}, {0, 2, 4})
+                for j in (0, 2, 4):
+                    self.assertEqual(m[0][j], ST if j in promoted else SA)
+                self.assertEqual(m[0][1], G)
+                self.assertEqual(m[0][3], G)
+
+    def test_grey_centre_with_sa_at_signed_pm1_can_leave_no_tested_point(self):
+        # j: 0=G, 1=SA, 2=G, 3=SA, 4=G  →  valid_cols=[1,3], signed cols +1/-1,
+        # both odd. L1 promotes both SA cells; L0 promotes nothing, so the row
+        # comes back with two SA cells and no tested point. VRU Impact v1.2
+        # §3.4.3.3 / §3.4.4.3 define no re-draw (the draw is over the grid, and
+        # a real test zone is contiguous, so a grey centre between two blue
+        # cells does not occur on a vehicle). Pinned so the outcome is
+        # deliberate rather than accidental.
+        row = [G, SA, G, SA, G]
+        for coin, promoted in ((0, set()), (1, {1, 3})):
+            with self.subTest(coin=coin):
+                m = _make_matrix([row])
+                with patch("random.randint", return_value=coin):
+                    result = select_blue_pattern(0, m)
+                self.assertEqual({col for _, col, _ in result}, {1, 3})
+                for j in (1, 3):
+                    self.assertEqual(m[0][j], ST if j in promoted else SA)
+                tested = [c for _, c, color in result if color in (T, ST)]
+                self.assertEqual(sorted(tested), sorted(promoted))
 
     # ------------------------------------------------------------------
     # Non-all-blue row: SA→ST promotion path is never triggered
@@ -383,77 +288,146 @@ class TestSelectBluePatternSAPromotion(unittest.TestCase):
 
 
 # ===========================================================================
-# 3b – select_blue_pattern: no-orphan rows must never flip and never drop cells
+# 3b – select_blue_pattern: the start-point draw is unconditional and never
+#      drops cells
 #
-# Root-cause regression guard: select_blue_pattern used to run the coin flip
-# unconditionally on any all-blue row and return only the coin-selected half,
-# silently dropping any T/ST cell the coin didn't land on. These tests assert
-# random.randint is not even called when no SA is orphaned, and that every
-# blue cell in the row is always present in the return value.
+# VRU Impact v1.2 §3.4.3.3 / §3.4.4.3: Euro NCAP selects L0 or L1 (U0 or U1)
+# for every legform row, whatever the OEM declared. The draw decides which SA
+# cells are promoted to ST -- the even (L0/U0) or the odd (L1/U1) signed
+# columns, measured as centre - j -- and nothing else: declared T/ST cells
+# are never relabeled and every blue cell in the span is always returned.
 # ===========================================================================
 
 
-class TestSelectBluePatternNoOrphanPreservesAll(unittest.TestCase):
+class TestSelectBluePatternRowTwoPromotionScope(unittest.TestCase):
+    """Row 1 (Femur) and row 2 (Knee & Tibia) are one impact and share the
+    draw, but only on the columns row 1 actually tests. A column that is grey
+    on row 1 is not an impact at all, so promoting row 2 there would mark a
+    point tested that nothing ever returns: it leaves the SA state, so the
+    unselected-SA fallback in process_legform_test stops picking it up, and the
+    row disappears from the verification sheet."""
 
-    def test_all_st_row_no_flip_all_kept(self):
+    def _matrix(self):
+        # Femur grey at col 0; Knee & Tibia has a real SA there.
+        return _make_matrix(
+            [
+                [G, G, G, G, G],
+                [G, SA, ST, SA, ST],
+                [SA, SA, ST, SA, ST],
+            ]
+        )
+
+    def test_row_two_is_not_promoted_where_the_femur_cell_is_grey(self):
+        # centre index 2, so coin=0 covers signed-even cols 0, 2, 4. Col 0 is
+        # the one row 1 cannot test.
+        m = self._matrix()
+        with patch("random.randint", return_value=0):
+            result = select_blue_pattern(1, m)
+
+        self.assertNotIn(0, {col for _, col, _ in result})
+        self.assertEqual(
+            m[2][0],
+            SA,
+            "Knee & Tibia col 0 was promoted although the Femur cell is grey; "
+            "it would then be dropped from the sheet entirely",
+        )
+
+    def test_every_promoted_row_two_cell_is_a_returned_column(self):
+        """The invariant behind the bug: nothing on row 2 may change state at a
+        column the caller is not told about."""
+        for coin in (0, 1):
+            with self.subTest(coin=coin):
+                m = self._matrix()
+                before = list(m[2])
+                with patch("random.randint", return_value=coin):
+                    result = select_blue_pattern(1, m)
+                returned = {col for _, col, _ in result}
+                promoted = {j for j in range(len(before)) if m[2][j] != before[j]}
+                self.assertTrue(promoted <= returned)
+
+    def test_row_two_still_follows_the_draw_on_tested_columns(self):
+        """The fix must not stop the shared draw where it is legitimate."""
+        m = self._matrix()
+        with patch("random.randint", return_value=1):
+            select_blue_pattern(1, m)
+        # coin=1 covers signed-odd cols 1 and 3, both tested on row 1.
+        self.assertEqual(m[2][1], ST)
+        self.assertEqual(m[2][3], ST)
+
+
+class TestSelectBluePatternUnconditionalDrawPreservesAll(unittest.TestCase):
+
+    def test_all_st_row_draws_and_keeps_all(self):
         # From the real fixture allST_clean.xlsx (legform row 1, Femur): [ST]*21.
         row = [ST] * 21
         m = _make_matrix([row])
-        with patch("random.randint") as mock_randint:
+        with patch("random.randint", return_value=0) as mock_randint:
             result = select_blue_pattern(0, m)
-        mock_randint.assert_not_called()
+        mock_randint.assert_called_once_with(0, 1)
         self.assertEqual(len(result), 21)
         self.assertEqual(
             [color for _, _, color in sorted(result, key=lambda t: t[1])], row
         )
 
-    def test_oem_alternating_plan_no_flip_reproduced_exactly(self):
+    def test_oem_alternating_plan_promotes_only_matching_parity(self):
+        # 7 wide, centre 3: SA at j=1,3,5 -> signed +2, 0, -2 (all even = L0).
         row = [T, SA, T, SA, T, SA, T]
-        m = _make_matrix([row])
-        with patch("random.randint") as mock_randint:
-            result = select_blue_pattern(0, m)
-        mock_randint.assert_not_called()
-        self.assertEqual(len(result), 7)
-        colors_by_col = {col: color for _, col, color in result}
-        self.assertEqual([colors_by_col[j] for j in range(7)], row)
+        for coin, expected in ((0, [T, ST, T, ST, T, ST, T]), (1, row)):
+            with self.subTest(coin=coin):
+                m = _make_matrix([row])
+                with patch("random.randint", return_value=coin) as mock_randint:
+                    result = select_blue_pattern(0, m)
+                mock_randint.assert_called_once()
+                self.assertEqual(len(result), 7)
+                colors_by_col = {col: color for _, col, color in result}
+                self.assertEqual([colors_by_col[j] for j in range(7)], expected)
 
-    def test_sa_pair_both_flanked_no_flip(self):
-        # Both SAs already have a tested neighbor (idx0=T covers idx1, idx3=T covers idx2).
+    def test_sa_pair_each_side_promoted_by_its_parity(self):
+        # 4 wide, centre 2: j=1 -> +1 (odd), j=2 -> 0 (even).
         row = [T, SA, SA, T]
-        m = _make_matrix([row])
-        with patch("random.randint") as mock_randint:
-            result = select_blue_pattern(0, m)
-        mock_randint.assert_not_called()
-        colors_by_col = {col: color for _, col, color in result}
-        self.assertEqual([colors_by_col[j] for j in range(4)], row)
+        for coin, expected in ((0, [T, SA, ST, T]), (1, [T, ST, SA, T])):
+            with self.subTest(coin=coin):
+                m = _make_matrix([row])
+                with patch("random.randint", return_value=coin):
+                    result = select_blue_pattern(0, m)
+                colors_by_col = {col: color for _, col, color in result}
+                self.assertEqual([colors_by_col[j] for j in range(4)], expected)
 
-    def test_no_orphaned_sa_in_longer_row_no_flip(self):
+    def test_longer_row_promotes_by_signed_parity(self):
+        # 8 wide, centre 4, signed = 4 - j: SA at j=1 (+3), 3 (+1), 4 (0), 6 (-2).
         row = [T, SA, T, SA, SA, T, SA, T]
-        m = _make_matrix([row])
-        with patch("random.randint") as mock_randint:
-            result = select_blue_pattern(0, m)
-        mock_randint.assert_not_called()
-        colors_by_col = {col: color for _, col, color in result}
-        self.assertEqual([colors_by_col[j] for j in range(len(row))], row)
+        for coin, expected in (
+            (0, [T, SA, T, SA, ST, T, ST, T]),
+            (1, [T, ST, T, ST, SA, T, SA, T]),
+        ):
+            with self.subTest(coin=coin):
+                m = _make_matrix([row])
+                with patch("random.randint", return_value=coin):
+                    result = select_blue_pattern(0, m)
+                colors_by_col = {col: color for _, col, color in result}
+                self.assertEqual([colors_by_col[j] for j in range(len(row))], expected)
 
-    def test_real_mixed_no_orphan_row_from_fixture(self):
+    def test_real_mixed_row_from_fixture_promotes_one_sa_per_pair(self):
         # From the real fixture cp_template_legform_all_ST.xlsx (legform row 1,
-        # Femur): despite the file's name, this row embeds two SA-SA pairs, each
-        # flanked by ST on both sides -- every SA already has a tested neighbor,
-        # so this must NOT flip. Today's bug flips it anyway and drops ~half the
-        # declared ST cells.
+        # Femur): 21 wide, centre 10; SA pairs at j=6,7 (+4,+3) and j=13,14
+        # (-3,-4). Each draw promotes one SA of each pair, mirror-symmetrically.
         row = [ST] * 6 + [SA, SA] + [ST] * 5 + [SA, SA] + [ST] * 6
         self.assertEqual(len(row), 21)
-        m = _make_matrix([row])
-        with patch("random.randint") as mock_randint:
-            result = select_blue_pattern(0, m)
-        mock_randint.assert_not_called()
-        self.assertEqual(len(result), 21)
-        colors_by_col = {col: color for _, col, color in result}
-        self.assertEqual([colors_by_col[j] for j in range(21)], row)
+        for coin, promoted in ((0, {6, 14}), (1, {7, 13})):
+            with self.subTest(coin=coin):
+                m = _make_matrix([row])
+                with patch("random.randint", return_value=coin):
+                    result = select_blue_pattern(0, m)
+                self.assertEqual(len(result), 21)
+                colors_by_col = {col: color for _, col, color in result}
+                for j in range(21):
+                    expected = ST if (row[j] == ST or j in promoted) else SA
+                    self.assertEqual(m[0][j], expected, f"coin={coin} col={j}")
+                    self.assertEqual(colors_by_col[j], expected)
 
-    def test_outermost_orphaned_sa_flips_and_leaves_no_orphan(self):
-        # idx0's SA neighbor is idx1 (also SA) -> orphaned; same for idx5. Must flip.
+    def test_outermost_sa_cells_leave_no_orphan(self):
+        # 6 wide, centre 3. Whatever the draw, no SA may be left without a
+        # tested (T/ST) neighbour, because _resolve_legform_blue_values needs one.
         row = [SA, SA, T, T, SA, SA]
         for coin in (0, 1):
             with self.subTest(coin=coin):
@@ -465,7 +439,6 @@ class TestSelectBluePatternNoOrphanPreservesAll(unittest.TestCase):
                 # The T cells (idx 2, 3) must never be relabeled.
                 self.assertEqual(m[0][2], T)
                 self.assertEqual(m[0][3], T)
-                # No SA may remain orphaned after promotion.
                 final = m[0]
                 t_st = {T, ST}
                 for i in range(6):
@@ -477,15 +450,18 @@ class TestSelectBluePatternNoOrphanPreservesAll(unittest.TestCase):
                         )
 
     def test_greenfield_all_sa_reduces_to_alternating_pattern(self):
-        # From the real fixture cp_template_legform_all_SA.xlsx (legform row 1): [SA]*21.
+        # From the real fixture cp_template_legform_all_SA.xlsx (legform row 1):
+        # [SA]*21, centre 10 (even), so j and its signed column share parity.
         row = [SA] * 21
-        m = _make_matrix([row])
-        with patch("random.randint", return_value=0):
-            result = select_blue_pattern(0, m)
-        self.assertEqual({col for _, col, _ in result}, set(range(21)))
-        for col in range(21):
-            expected = ST if col % 2 == 0 else SA
-            self.assertEqual(m[0][col], expected)
+        for coin in (0, 1):
+            with self.subTest(coin=coin):
+                m = _make_matrix([row])
+                with patch("random.randint", return_value=coin):
+                    result = select_blue_pattern(0, m)
+                self.assertEqual({col for _, col, _ in result}, set(range(21)))
+                for col in range(21):
+                    expected = ST if col % 2 == coin else SA
+                    self.assertEqual(m[0][col], expected)
 
     def test_t_st_never_relabeled_regardless_of_coin(self):
         row = [T, SA, ST, SA, T, SA]
@@ -499,18 +475,73 @@ class TestSelectBluePatternNoOrphanPreservesAll(unittest.TestCase):
                 self.assertEqual(m[0][2], ST)
                 self.assertEqual(m[0][4], T)
 
-    def test_parity_measured_over_valid_cols_not_raw_column(self):
-        # j: 0=SA, 1=G, 2=SA, 3=G, 4=SA -> valid_cols=[0,2,4], greenfield (orphaned).
-        # coin=0 selects valid_cols indices 0,2 (i.e. raw cols 0 and 4), not raw
-        # columns 0 and 2 (which would be wrong since col 1 is grey, not blue).
-        row = [SA, G, SA, G, SA]
-        m = _make_matrix([row])
+    def test_parity_measured_on_signed_column_not_span_index(self):
+        # 7 wide, centre 3, blue span starting at j=2: signed = 3 - j gives
+        # j=2:+1, 3:0, 4:-1, 5:-2, 6:-3. Index-within-span parity would pick
+        # j=2,4,6 for coin=0; the signed-column rule picks j=3,5 (L0) instead.
+        row = [G, G, SA, SA, SA, SA, SA]
+        for coin, promoted in ((0, {3, 5}), (1, {2, 4, 6})):
+            with self.subTest(coin=coin):
+                m = _make_matrix([row])
+                with patch("random.randint", return_value=coin):
+                    result = select_blue_pattern(0, m)
+                self.assertEqual({col for _, col, _ in result}, {2, 3, 4, 5, 6})
+                for j in range(2, 7):
+                    self.assertEqual(m[0][j], ST if j in promoted else SA, f"col {j}")
+                self.assertEqual(m[0][0], G)
+                self.assertEqual(m[0][1], G)
+
+    def test_l0_tests_centre_column_l1_does_not(self):
+        # Column 0 is even: L0/U0 always carries the centre point, L1/U1 never.
+        row = [SA] * 21
+        for coin, centre_color in ((0, ST), (1, SA)):
+            with self.subTest(coin=coin):
+                m = _make_matrix([row])
+                with patch("random.randint", return_value=coin):
+                    select_blue_pattern(0, m)
+                self.assertEqual(m[0][10], centre_color)
+
+    def test_promoted_set_is_mirror_symmetric(self):
+        # col and -col share parity, so the promotion preserves whatever
+        # symmetry the declared row has.
+        row = [SA, ST, SA, ST, ST, SA, ST, SA, ST, SA, ST, ST, SA, ST, SA]
+        for coin in (0, 1):
+            with self.subTest(coin=coin):
+                m = _make_matrix([row])
+                with patch("random.randint", return_value=coin):
+                    select_blue_pattern(0, m)
+                for j in range(len(row)):
+                    self.assertEqual(m[0][j], m[0][len(row) - 1 - j], f"col {j}")
+
+    def test_apli_row_l0_gives_11_l1_gives_12_tested_cells(self):
+        # An aPLI Femur row over +7 .. -7 (15 wide, centre 7) with
+        # 8 declared ST. L0 promotes signed +2, 0, -2 -> 11 tested; L1 promotes
+        # signed +7, +5, -5, -7 -> 12 tested.
+        row = [SA, ST, SA, ST, ST, SA, ST, SA, ST, SA, ST, ST, SA, ST, SA]
+        self.assertEqual(row.count(ST), 8)
+        for coin, n_st, promoted_signed in (
+            (0, 11, {2, 0, -2}),
+            (1, 12, {7, 5, -5, -7}),
+        ):
+            with self.subTest(coin=coin):
+                m = _make_matrix([row])
+                with patch("random.randint", return_value=coin):
+                    result = select_blue_pattern(0, m)
+                self.assertEqual(len(result), 15)
+                self.assertEqual(m[0].count(ST), n_st)
+                promoted = {7 - j for j in range(15) if row[j] == SA and m[0][j] == ST}
+                self.assertEqual(promoted, promoted_signed)
+
+    def test_row2_follows_row1_draw_with_its_own_sa_check(self):
+        # Femur (row 1) and Knee & Tibia (row 2) are one impact: the same draw
+        # applies to both, but each cell is promoted only if it is itself SA.
+        row1 = [SA, SA, SA, SA, SA]
+        row2 = [SA, ST, G, SA, T]
+        m = _make_matrix([[G] * 5, row1, row2])
         with patch("random.randint", return_value=0):
-            result = select_blue_pattern(0, m)
-        self.assertEqual({col for _, col, _ in result}, {0, 2, 4})
-        self.assertEqual(m[0][0], ST)
-        self.assertEqual(m[0][4], ST)
-        self.assertEqual(m[0][2], SA)
+            select_blue_pattern(1, m)
+        self.assertEqual(m[1], [ST, SA, ST, SA, ST])
+        self.assertEqual(m[2], [ST, ST, G, SA, T])
 
 
 # ===========================================================================
@@ -1048,13 +1079,14 @@ class TestValueColumnSAStyling(unittest.TestCase):
 
 
 # ===========================================================================
-# 8 – End-to-end: process_legform_test consistency check is called
+# 8 – End-to-end: asymmetric legform patterns are accepted
 # ===========================================================================
 
 
-class TestProcessLegformTestCallsSymmetryCheck(unittest.TestCase):
-    """Verify that process_legform_test invokes check_legform_blue_symmetry
-    and propagates any ValueError it raises."""
+class TestProcessLegformTestAcceptsAsymmetry(unittest.TestCase):
+    """Euro NCAP accepts legform T/ST/SA patterns that are not left/right
+    symmetric, so process_legform_test must run them through unchanged
+    instead of raising."""
 
     def _minimal_df(self):
         """Minimal prediction DataFrame: 28 rows × 25 cols, all grey."""
@@ -1072,30 +1104,32 @@ class TestProcessLegformTestCallsSymmetryCheck(unittest.TestCase):
             }
         )
 
-    def test_symmetry_check_called_and_error_propagates(self):
-        """Patching check_legform_blue_symmetry to raise ensures it is called."""
+    def test_t_without_mirror_is_accepted(self):
+        """T at j=0 with a grey mirror at j=20 used to raise 'Asymmetric T/ST
+        prediction'; it is now a legitimate tested point."""
         pred_df = self._minimal_df()
-        vru_params = self._minimal_params()
-        sentinel = ValueError("injected asymmetry error")
-        with patch.object(
-            vru_processing, "check_legform_blue_symmetry", side_effect=sentinel
-        ):
-            with self.assertRaises(ValueError) as ctx:
-                vru_processing.process_legform_test(pred_df, vru_params)
-        self.assertIs(ctx.exception, sentinel)
-
-    def test_asymmetric_t_raises_via_real_matrix(self):
-        """T at j=0 without a symmetric T/ST partner → real ValueError."""
-        pred_df = self._minimal_df()
-        # 25 cols → after iloc[23:28].iloc[2:, 4:] → 3 rows × 21 cols
-        # j=0 maps to df col 4; j=20 (symmetric) maps to df col 24
-        # Set row 25 (legform matrix row 0) j=0 to "t", leave j=20 as "grey"
+        # 25 cols → after iloc[23:28].iloc[2:, 4:] → 3 rows × 21 cols;
+        # j=0 maps to df col 4, its mirror j=20 to df col 24 (left grey).
         for df_row in (25, 26, 27):
-            pred_df.iat[df_row, 4] = "t"  # j=0, col=10 → no symmetric at j=20
-        vru_params = self._minimal_params()
-        with self.assertRaises(ValueError) as ctx:
-            vru_processing.process_legform_test(pred_df, vru_params)
-        self.assertIn("Asymmetric", str(ctx.exception))
+            pred_df.iat[df_row, 4] = "t"
+        result = vru_processing.process_legform_test(pred_df, self._minimal_params())
+        self.assertEqual(len(result), 3)
+        self.assertTrue(all(p.color == T for p in result))
+
+    def test_sa_mirrored_by_st_is_accepted(self):
+        """SA at j=0 facing an ST at j=20 used to raise 'expected SA'."""
+        pred_df = self._minimal_df()
+        pred_df.iat[25, 4] = "sa"
+        pred_df.iat[25, 24] = "st"
+        # Both cells are blue, so the row goes through the start-point draw.
+        # Pin it to the odd columns (coin=1): j=0 is an even signed column,
+        # so its SA is not promoted and the test isolates pattern acceptance.
+        with patch("random.randint", return_value=1):
+            result = vru_processing.process_legform_test(
+                pred_df, self._minimal_params()
+            )
+        self.assertEqual(len(result), 2)
+        self.assertEqual({p.color for p in result}, {SA, ST})
 
 
 # ===========================================================================
@@ -1176,15 +1210,14 @@ class TestProcessLegformTestWithManualInput(unittest.TestCase):
         * legform matrix row r  ↔  df row  25 + r
         * legform matrix col j  ↔  df col   4 + j
     The matrix produced from a 28×15 "all-grey" df therefore has shape 3×11.
-    Column j=5 (centre, N=11, col_center=5) is symmetric to itself, which
-    makes it convenient for single-cell tests that need to pass the symmetry
-    check.
+    Column j=5 (centre, N=11, col_center=5) is the one the single-cell
+    tests use.
     """
 
     _LEG_ROW = 25  # df row offset for legform matrix row 0
     _LEG_COL = 4  # df col offset for legform matrix col 0
     _N_COLS = 11  # number of legform matrix columns (df has 15 cols, cols 4–14)
-    _CENTER = 5  # symmetric-to-itself column index in an 11-wide matrix
+    _CENTER = 5  # centre column index in an 11-wide matrix
 
     def _build_df(self, cells=None):
         """28×15 all-grey DataFrame with optional legform cells set.
@@ -1229,18 +1262,19 @@ class TestProcessLegformTestWithManualInput(unittest.TestCase):
         self.assertEqual(matched[0].color, VruPredictionColor.BLUE_ST)
 
     # ------------------------------------------------------------------
-    # 2. Consistency check still active
+    # 2. Asymmetric patterns are accepted
     # ------------------------------------------------------------------
 
-    def test_symmetry_check_raises_for_asymmetric_blue_matrix(self):
-        """Asymmetric T cell in the matrix must raise ValueError even when
-        input_selected_points is provided (check runs before point matching)."""
-        # j=3 has symmetric j_sym = 11-1-3 = 7; only j=3 is T → asymmetric
+    def test_asymmetric_blue_matrix_is_accepted(self):
+        """A T cell whose mirror is grey (j=3 vs j_sym=7) used to raise before
+        point matching; it must now match like any other point."""
         df = self._build_df({(1, 3): "t"})
-        with self.assertRaises(ValueError):
-            self._call(
-                df, {"Lower Leg": [{"Body region": "Femur", "row": 1, "col": 7}]}
-            )
+        result = self._call(
+            df, {"Lower Leg": [{"Body region": "Femur", "row": 1, "col": 7}]}
+        )
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].color, VruPredictionColor.BLUE_ST)
+        self.assertEqual((result[0].row, result[0].col), (1, 7))
 
     # ------------------------------------------------------------------
     # 3. Row-2 mirror
@@ -1265,6 +1299,25 @@ class TestProcessLegformTestWithManualInput(unittest.TestCase):
         )
         row2_points = [p for p in result if p.row == 2]
         self.assertEqual(row2_points, [])
+
+    def test_manual_selection_femur_and_knee_same_column_no_duplicate(self):
+        """The lab tests Femur and Knee & Tibia at the same column (one impact)
+        on an SA cell. The explicitly selected Knee & Tibia point must appear
+        once, as BLUE_ST; the Femur mirror must not add a second, SA-coloured
+        copy of it (an SA copy of a tested point is left unresolved and scores
+        0 in the Knee & Tibia minimum)."""
+        df = self._build_df({(1, self._CENTER): "t", (2, self._CENTER): "sa"})
+        result = self._call(
+            df,
+            {
+                "Lower Leg": [
+                    {"Body region": "Femur", "row": 1, "col": 5},
+                    {"Body region": "Knee/Tibia", "row": 2, "col": 5},
+                ]
+            },
+        )
+        row2_points = [(p.row, p.col, p.color) for p in result if p.row == 2]
+        self.assertEqual(row2_points, [(2, 5, VruPredictionColor.BLUE_ST)])
 
     # ------------------------------------------------------------------
     # 4. Unselected SA cells always appear in output
@@ -1595,7 +1648,7 @@ class TestPartialUploadScenario(unittest.TestCase):
 class TestLegformRealTemplateShapedFill(unittest.TestCase):
     """Build a DataFrame shaped like the real template (spacer + legend-text
     columns trailing the 21 real data columns) and fill the 3 legform rows
-    with all-T, all-ST, all-SA, and a symmetric mixed pattern."""
+    with all-T, all-ST, all-SA, and a mixed pattern."""
 
     _NUM_REAL_COLS = 21  # E:Y
 
@@ -1630,40 +1683,12 @@ class TestLegformRealTemplateShapedFill(unittest.TestCase):
         self.assertEqual(len(matrix[0]), self._NUM_REAL_COLS)
 
     # ------------------------------------------------------------------
-    # All T
-    # ------------------------------------------------------------------
-
-    def test_all_t_passes_symmetry_check(self):
-        matrix = self._matrix([["t"] * self._NUM_REAL_COLS] * 3)
-        check_legform_blue_symmetry(matrix)  # must not raise
-        self.assertTrue(all(c == T for row in matrix for c in row))
-
-    # ------------------------------------------------------------------
-    # All ST
-    # ------------------------------------------------------------------
-
-    def test_all_st_passes_symmetry_check(self):
-        matrix = self._matrix([["st"] * self._NUM_REAL_COLS] * 3)
-        check_legform_blue_symmetry(matrix)  # must not raise
-        self.assertTrue(all(c == ST for row in matrix for c in row))
-
-    # ------------------------------------------------------------------
-    # All SA
-    # ------------------------------------------------------------------
-
-    def test_all_sa_passes_symmetry_check(self):
-        matrix = self._matrix([["sa"] * self._NUM_REAL_COLS] * 3)
-        check_legform_blue_symmetry(matrix)  # must not raise
-        self.assertTrue(all(c == SA for row in matrix for c in row))
-
-    # ------------------------------------------------------------------
-    # Mixed T / ST / SA – symmetric about the centre column, must pass
+    # Mixed T / ST / SA about the centre column
     # ------------------------------------------------------------------
 
     def _symmetric_mixed_row(self):
         # 21 columns, centre index 10. Colour depends only on distance from
-        # centre, so the row is symmetric by construction: outer -> T,
-        # middle -> ST, centre 3 columns -> SA.
+        # centre: outer -> T, middle -> ST, centre 3 columns -> SA.
         row = []
         for j in range(self._NUM_REAL_COLS):
             distance = abs(j - 10)
@@ -1674,25 +1699,6 @@ class TestLegformRealTemplateShapedFill(unittest.TestCase):
             else:
                 row.append("sa")
         return row
-
-    def test_mixed_symmetric_row_passes_symmetry_check(self):
-        mixed_row = self._symmetric_mixed_row()
-        matrix = self._matrix([mixed_row] * 3)
-        check_legform_blue_symmetry(matrix)  # must not raise
-        self.assertEqual(matrix[0][0], T)
-        self.assertEqual(matrix[0][10], SA)
-
-    # ------------------------------------------------------------------
-    # Mixed T / ST / SA – asymmetric must still be caught
-    # ------------------------------------------------------------------
-
-    def test_mixed_asymmetric_row_still_raises(self):
-        mixed_row = self._symmetric_mixed_row()
-        mixed_row[0] = "t"
-        mixed_row[-1] = "sa"  # breaks symmetry: T at j=0 mirrors SA at j=20
-        matrix = self._matrix([mixed_row] * 3)
-        with self.assertRaises(ValueError):
-            check_legform_blue_symmetry(matrix)
 
     # ------------------------------------------------------------------
     # End-to-end: process_legform_test must not crash on a uniformly
@@ -1728,18 +1734,24 @@ class TestLegformRealTemplateShapedFill(unittest.TestCase):
         self.assertEqual(len(result), 63)
         self.assertTrue(all(p.color in (ST, SA) for p in result))
 
-    def test_process_legform_test_end_to_end_no_orphan_mixed_row(self):
+    def test_process_legform_test_end_to_end_mixed_row_promotes_one_sa_per_pair(
+        self,
+    ):
         # From the real fixture cp_template_legform_all_ST.xlsx (legform row,
-        # Femur/Knee & Tibia): two SA-SA pairs each flanked by ST -- no orphan,
-        # so nothing may be dropped or relabeled anywhere in the pipeline.
+        # Femur/Knee & Tibia): two SA-SA pairs at signed (+4,+3) and (-3,-4).
+        # Every row draws (row 2 follows row 1), and whichever side the draw
+        # lands on, exactly one SA of each pair is promoted: nothing is dropped.
         mixed_row = ["st"] * 6 + ["sa", "sa"] + ["st"] * 5 + ["sa", "sa"] + ["st"] * 6
         self.assertEqual(len(mixed_row), self._NUM_REAL_COLS)
-        df = self._build_df([mixed_row] * 3)
-        result = vru_processing.process_legform_test(df, self._vru_params())
-        self.assertEqual(len(result), 63)
-        colors = [p.color for p in result]
-        self.assertEqual(colors.count(ST), 3 * 17)
-        self.assertEqual(colors.count(SA), 3 * 4)
+        for coin in (0, 1):
+            with self.subTest(coin=coin):
+                df = self._build_df([mixed_row] * 3)
+                with patch("random.randint", return_value=coin):
+                    result = vru_processing.process_legform_test(df, self._vru_params())
+                self.assertEqual(len(result), 63)
+                colors = [p.color for p in result]
+                self.assertEqual(colors.count(ST), 3 * 19)
+                self.assertEqual(colors.count(SA), 3 * 2)
 
 
 # ===========================================================================

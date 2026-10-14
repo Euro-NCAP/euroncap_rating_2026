@@ -6,14 +6,19 @@
 
 """
 The 2 km/h impact-speed tolerance of Crash Avoidance - Frontal Collisions v1.2
-sec 4.2.4.
+sec 4.2.4, and the band convention it is applied on.
 
-Two things are pinned here:
+Pinned here:
 
-* the accepted ranges of the worked table in that section, which the tolerance
-  window must reproduce exactly. Before the fix both branches widened the
-  predicted band *inward*, so no value anywhere reached IN_TOLERANCE and every
-  "accepted" case below returned INCORRECT;
+* the v_rel_impact colour bands give a boundary value to the band *above*
+  (10.0 is Orange, 20.0 Brown, 30.0 Red), the same convention as the Crash
+  Protection criteria, with Green kept as the single point v = 0;
+* the accepted ranges the tolerance window must reproduce exactly on that
+  convention. Before the fix both branches widened the predicted band
+  *inward*, so no value anywhere reached IN_TOLERANCE and every "accepted"
+  case below returned INCORRECT;
+* the FCW TTC band: sec 5.2 gives Green >= 1.7 s and Red < 1.7 s, so a warning
+  at exactly 1.70 s is Green;
 * that the tolerance is scoped to the v_rel_impact KPI. The remaining criteria
   score a speed reduction, a TTC in seconds, a distance in metres or a 0/1
   impact flag, so a global 2.0 would read as 2 seconds / 2 metres / 2 impacts
@@ -64,15 +69,17 @@ def compute(test_name, predicted, value, attributes=None, assessment_criteria=No
 
 class TestImpactSpeedToleranceWorkedTable(unittest.TestCase):
     """
-    sec 4.2.4's worked example, the 60 km/h CMRs matrix (v_rel_impact bands
-    green v = 0, yellow <= 10, orange <= 20, brown <= 30, red > 30):
+    sec 4.2.4's worked example, the 60 km/h CMRs matrix (v_rel_impact band
+    edges 0 / 10 / 20 / 30, the boundary belonging to the band above), with
+    the 2 km/h window applied on the same convention: b - 2 <= v < b + 2 for
+    a middle band, v < 2 for Green, and Red not widened downward:
 
         Colour   Impact speed      Accepted range
         Green    v = 0             v < 2
-        Yellow   0 < v <= 10       0 < v <= 12
-        Orange   10 < v <= 20      8 < v <= 22
-        Brown    20 < v <= 30      18 < v <= 32
-        Red      30 < v            -
+        Yellow   0 < v < 10        0 < v < 12
+        Orange   10 <= v < 20      8 <= v < 22
+        Brown    20 <= v < 30      18 <= v < 32
+        Red      30 <= v           30 <= v
     """
 
     TEST_NAME = "CMRs"
@@ -86,25 +93,29 @@ class TestImpactSpeedToleranceWorkedTable(unittest.TestCase):
         # Green accepts v < 2 strictly, as the table prints it.
         (GREEN, 1.9, IN_TOLERANCE, GREEN, YELLOW),
         (GREEN, 2.0, INCORRECT, YELLOW, YELLOW),
-        # Yellow: 0 < v <= 12. The lower edge stops at 0 rather than -2, so a
+        # Yellow: 0 < v < 12. The lower edge stops at 0 rather than -2, so a
         # fully avoided point keeps its own (better) Green colour.
         (YELLOW, 0.0, INCORRECT, GREEN, GREEN),
-        (YELLOW, 12.0, IN_TOLERANCE, YELLOW, ORANGE),
-        (YELLOW, 12.1, INCORRECT, ORANGE, ORANGE),
-        # Orange: 8 < v <= 22.
-        (ORANGE, 8.0, INCORRECT, YELLOW, YELLOW),
-        (ORANGE, 8.1, IN_TOLERANCE, ORANGE, YELLOW),
-        (ORANGE, 22.0, IN_TOLERANCE, ORANGE, BROWN),
-        (ORANGE, 22.1, INCORRECT, BROWN, BROWN),
-        # Brown: 18 < v <= 32.
-        (BROWN, 18.0, INCORRECT, ORANGE, ORANGE),
-        (BROWN, 18.1, IN_TOLERANCE, BROWN, ORANGE),
-        (BROWN, 32.0, IN_TOLERANCE, BROWN, RED),
-        (BROWN, 32.1, INCORRECT, RED, RED),
-        # Red is unbounded above; the tolerance still applies downward, since
-        # sec 4.2.4 applies it "in both directions".
-        (RED, 28.1, IN_TOLERANCE, RED, BROWN),
-        (RED, 27.9, INCORRECT, BROWN, BROWN),
+        (YELLOW, 0.01, CORRECT, YELLOW, YELLOW),
+        (YELLOW, 10.0, IN_TOLERANCE, YELLOW, ORANGE),
+        (YELLOW, 11.9, IN_TOLERANCE, YELLOW, ORANGE),
+        (YELLOW, 12.0, INCORRECT, ORANGE, ORANGE),
+        # Orange: 8 <= v < 22.
+        (ORANGE, 7.9, INCORRECT, YELLOW, YELLOW),
+        (ORANGE, 8.0, IN_TOLERANCE, ORANGE, YELLOW),
+        (ORANGE, 20.0, IN_TOLERANCE, ORANGE, BROWN),
+        (ORANGE, 21.9, IN_TOLERANCE, ORANGE, BROWN),
+        (ORANGE, 22.0, INCORRECT, BROWN, BROWN),
+        # Brown: 18 <= v < 32.
+        (BROWN, 17.9, INCORRECT, ORANGE, ORANGE),
+        (BROWN, 18.0, IN_TOLERANCE, BROWN, ORANGE),
+        (BROWN, 30.0, IN_TOLERANCE, BROWN, RED),
+        (BROWN, 31.9, IN_TOLERANCE, BROWN, RED),
+        (BROWN, 32.0, INCORRECT, RED, RED),
+        # Red starts at the 30 km/h edge itself and is not widened downward.
+        (RED, 30.0, CORRECT, RED, RED),
+        (RED, 29.9, INCORRECT, BROWN, BROWN),
+        (RED, 28.1, INCORRECT, BROWN, BROWN),
     ]
 
     def test_accepted_ranges(self):
@@ -131,7 +142,27 @@ class TestImpactSpeedToleranceWorkedTable(unittest.TestCase):
                             (RED, float("inf")),
                         ],
                         value,
+                        half_open=True,
+                        degenerate_first=True,
                     ),
+                )
+
+    def test_band_edges_belong_to_the_band_above(self):
+        """The true colour at each edge of the 60 km/h table, sec 5.2 read
+        with the Crash Protection convention; 0 stays the Green point."""
+        for value, true_color in [
+            (0.0, GREEN),
+            (0.01, YELLOW),
+            (9.99, YELLOW),
+            (10.0, ORANGE),
+            (19.99, ORANGE),
+            (20.0, BROWN),
+            (29.99, BROWN),
+            (30.0, RED),
+        ]:
+            with self.subTest(value=value):
+                self.assertEqual(
+                    compute(self.TEST_NAME, GREEN, value).measured_color, true_color
                 )
 
     def test_tolerance_is_reachable(self):
@@ -159,7 +190,7 @@ class TestToleranceScopedToVRelImpact(unittest.TestCase):
         self.assertEqual(ctp.computed_color, RED)
 
     def test_fcw_warning_ttc_has_no_tolerance_in_seconds(self):
-        # fcw_ttc, seconds: red at <= 1.7 s, so 1.6 s is a late warning and
+        # fcw_ttc, seconds: red at < 1.7 s, so 1.6 s is a late warning and
         # 2 "km/h" must not become 2 seconds here.
         ctp = compute("CPLA day", GREEN, 1.6, attributes={"Function": "FCW"})
         self.assertEqual(ctp.prediction_result, INCORRECT)
@@ -186,15 +217,78 @@ class TestToleranceScopedToVRelImpact(unittest.TestCase):
         self.assertEqual(ctp.computed_color, ORANGE)
 
 
+class TestFcwWarningBand(unittest.TestCase):
+    """
+    sec 5.2 warning criteria: FCW TTC Green >= 1.7 s, Red < 1.7 s. The
+    boundary value itself is Green.
+    """
+
+    def compute_fcw(self, predicted, ttc):
+        return compute("CPLA day", predicted, ttc, attributes={"Function": "FCW"})
+
+    def test_band_edge(self):
+        for ttc, true_color in [(1.69, RED), (1.70, GREEN), (1.71, GREEN)]:
+            with self.subTest(ttc=ttc):
+                self.assertEqual(
+                    self.compute_fcw(GREEN, ttc).measured_color, true_color
+                )
+
+    def test_prediction_at_the_edge(self):
+        point = self.compute_fcw(GREEN, 1.70)
+        self.assertEqual(point.prediction_result, CORRECT)
+        self.assertEqual(point.computed_color, GREEN)
+        point = self.compute_fcw(GREEN, 1.69)
+        self.assertEqual(point.prediction_result, INCORRECT)
+        self.assertEqual(point.computed_color, RED)
+
+
+class TestDegenerateGreenBandsUnchanged(unittest.TestCase):
+    """
+    Tables whose Green band is the single point v = 0 (or the 0/1 impact
+    flag): giving the boundary to the band above must not turn a fully
+    avoided run Red.
+    """
+
+    def test_avoided_run_stays_green(self):
+        for test_name, attributes in [
+            ("CCFtap", {}),  # avoidance, v_impact
+            ("CC ELK On", {}),  # ELK target, impact flag
+            ("CMRs", {"VUT speed": "10 km/h"}),  # mitigation or avoidance
+            ("CMRs", {"VUT speed": "20 km/h"}),
+            ("CMRs", {"VUT speed": "30 km/h"}),
+        ]:
+            with self.subTest(test_name=test_name, **attributes):
+                avoided = compute(test_name, GREEN, 0.0, attributes=attributes)
+                self.assertEqual(avoided.measured_color, GREEN)
+                self.assertEqual(avoided.prediction_result, CORRECT)
+                # The true colour of any impact is not Green; whether the
+                # Green prediction is rescued is the tolerance's business
+                # (2 km/h for v_rel_impact, none for the other two KPIs).
+                impact = compute(test_name, GREEN, 0.01, attributes=attributes)
+                self.assertNotEqual(impact.measured_color, GREEN)
+
+    def test_two_band_tables_have_no_gap_above_zero(self):
+        for test_name, attributes in [
+            ("CCFtap", {}),
+            ("CC ELK On", {}),
+            ("CMRs", {"VUT speed": "10 km/h"}),
+            ("CMRs", {"VUT speed": "20 km/h"}),
+        ]:
+            with self.subTest(test_name=test_name, **attributes):
+                point = compute(test_name, GREEN, 0.01, attributes=attributes)
+                self.assertEqual(point.measured_color, RED)
+
+
 class TestNotRedReadsTheTrueColour(unittest.TestCase):
     """
     The NOT_RED robustness criterion is an absolute performance bar, so the
     tolerance must not reach it: sec 4.2.4 scopes the tolerance to verifying
     the prediction, and the point's true colour is the measured band.
 
-    Both cases below are within 2 km/h of the brown/red boundary of CCRb at
-    VUT 60 km/h, i.e. exactly where the applied colour and the true colour
-    disagree.
+    The cases below sit around the brown/red boundary of CCRb at VUT 60 km/h:
+    a brown prediction accepted within tolerance for a run that was really
+    red, and a red prediction for a run that stayed brown (Red is not widened
+    downward, so that prediction is simply wrong).
     """
 
     LOADCASE = "CCRb"
@@ -223,7 +317,7 @@ class TestNotRedReadsTheTrueColour(unittest.TestCase):
         point = compute(
             self.LOADCASE,
             BROWN,
-            32.0,
+            31.0,
             assessment_criteria=robustness_layer.AssessmentCriteria.NOT_RED,
         )
         # The prediction itself is accepted -- brown, within tolerance ...
@@ -240,15 +334,21 @@ class TestNotRedReadsTheTrueColour(unittest.TestCase):
             29.0,
             assessment_criteria=robustness_layer.AssessmentCriteria.NOT_RED,
         )
-        self.assertEqual(point.prediction_result, IN_TOLERANCE)
-        self.assertEqual(point.computed_color, RED)
+        self.assertEqual(point.prediction_result, INCORRECT)
+        self.assertEqual(point.computed_color, BROWN)
         self.assertEqual(point.measured_color, BROWN)
         self.assertEqual(self.score(point).standard_score, self.STANDARD_TOTAL)
 
     def test_criterion_is_unmoved_by_the_tolerance(self):
         """Neither verdict differs from the one the plain band lookup gives,
         which is what the criterion used before the tolerance existed."""
-        for predicted, value in [(BROWN, 32.0), (RED, 29.0), (GREEN, 1.5)]:
+        for predicted, value in [
+            (BROWN, 31.0),
+            (BROWN, 32.0),
+            (RED, 29.0),
+            (RED, 30.0),
+            (GREEN, 1.5),
+        ]:
             with self.subTest(predicted=predicted, value=value):
                 point = compute(
                     self.LOADCASE,
@@ -285,6 +385,37 @@ class TestToleranceMap(unittest.TestCase):
             matrix_processing.COLOR_THRESHOLD_TOLERANCE,
         )
 
+    def test_default_bands_keep_widening_by_a_caller_tolerance(self):
+        """
+        The (lower, upper] convention, with a tolerance passed by the caller
+        (no criteria in this package does): the predicted band is still
+        widened outward by it in both directions, as before the half-open
+        bands were added.
+        """
+        thresholds = [
+            (GREEN, 0.0),
+            (YELLOW, 10.0),
+            (ORANGE, 20.0),
+            (BROWN, 30.0),
+            (RED, float("inf")),
+        ]
+        for predicted, value, expected in [
+            (GREEN, 1.9, IN_TOLERANCE),
+            (GREEN, 2.0, INCORRECT),
+            (YELLOW, 11.0, IN_TOLERANCE),
+            (YELLOW, 12.0, IN_TOLERANCE),
+            (YELLOW, 12.1, INCORRECT),
+            (ORANGE, 8.0, INCORRECT),
+            (ORANGE, 8.1, IN_TOLERANCE),
+            (RED, 28.1, IN_TOLERANCE),
+            (RED, 27.9, INCORRECT),
+        ]:
+            with self.subTest(predicted=predicted, value=value):
+                result, _ = matrix_processing.check_thresholds(
+                    thresholds, predicted, value, 2.0
+                )
+                self.assertEqual(result, expected)
+
     def test_zero_tolerance_window_is_a_no_op(self):
         """
         With tolerance 0 the widened window collapses to the predicted band,
@@ -298,15 +429,23 @@ class TestToleranceMap(unittest.TestCase):
             (BROWN, 30.0),
             (RED, float("inf")),
         ]
-        for predicted in (GREEN, YELLOW, ORANGE, BROWN, RED):
-            value = 0.0
-            while value <= 45.0:
-                result, _ = matrix_processing.check_thresholds(
-                    thresholds, predicted, value, 0.0
-                )
-                with self.subTest(predicted=predicted, value=value):
-                    self.assertNotEqual(result, IN_TOLERANCE)
-                value = round(value + 0.1, 2)
+        for half_open in (False, True):
+            for predicted in (GREEN, YELLOW, ORANGE, BROWN, RED):
+                value = 0.0
+                while value <= 45.0:
+                    result, _ = matrix_processing.check_thresholds(
+                        thresholds,
+                        predicted,
+                        value,
+                        0.0,
+                        half_open=half_open,
+                        degenerate_first=half_open,
+                    )
+                    with self.subTest(
+                        half_open=half_open, predicted=predicted, value=value
+                    ):
+                        self.assertNotEqual(result, IN_TOLERANCE)
+                    value = round(value + 0.1, 2)
 
 
 if __name__ == "__main__":

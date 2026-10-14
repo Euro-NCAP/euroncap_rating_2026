@@ -14,6 +14,7 @@ from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 
 from euroncap_rating_2026.safe_driving import data_model
 from euroncap_rating_2026.safe_driving import acc_performance
+from euroncap_rating_2026.safe_driving import driver_monitoring
 from euroncap_rating_2026 import common
 
 import logging
@@ -92,6 +93,17 @@ NA_VALUE_ROW_CATEGORIES = {
     "OM - Occ. classification verif.": {"Passenger airbag status"},
     "VA - ACC verif.": {"Auto-resume"},
 }
+
+
+def get_dm_verif_header_row(ws):
+    """1-based row of the "DE - DM verif." test-point table header: the
+    first row below row 1 whose column A is "Category" (row 4 with a single
+    General requirements row, further down with one row per requirement).
+    None when the sheet has no such table."""
+    for row in range(2, ws.max_row + 1):
+        if ws.cell(row=row, column=1).value == "Category":
+            return row
+    return None
 
 
 def _get_na_value_rows(ws) -> set:
@@ -644,13 +656,14 @@ def write_report(
             cell.fill = header_fill
             cell.font = header_font
 
-        # Row 4 is the driver-state sub-header in the normal multi-column DM
-        # verif layout. When mandatory noise variables fail, preprocess
-        # instead writes a single-column "Category" message table (see
-        # driver_monitoring.preprocess) -- skip the row-4 header treatment
-        # there, it would just paint one of the message rows as a header.
-        if sheet_name == "DE - DM verif." and ws.max_row >= 4 and ws.max_column > 1:
-            common.set_header_by_row(ws, 4, header_fill, header_font)
+        # The DM verif test-point table has its own "Category" header row
+        # below the General requirements rows. When mandatory noise variables
+        # fail, preprocess instead writes a single-column "Category" message
+        # table (see driver_monitoring.preprocess) -- no sub-header there.
+        if sheet_name == "DE - DM verif." and ws.max_column > 1:
+            dm_header_row = get_dm_verif_header_row(ws)
+            if dm_header_row is not None:
+                common.set_header_by_row(ws, dm_header_row, header_fill, header_font)
 
         if sheet_name == "VA - ACC verif.":
             common.set_header_by_row(ws, 9, header_fill, header_font)
@@ -677,6 +690,7 @@ def write_report(
                 headers.index("Scenario") + 1 if "Scenario" in headers else None
             )
             validation_cells = []
+            pass_fail_na_cells = []
             # Category is only written on the first row of a group (e.g. "Road
             # features" on Curves, blank on Roundabouts/Intersection/... right
             # below it) -- forward-fill so continuation rows are still
@@ -688,6 +702,18 @@ def write_report(
                 # N/A rows need no user input at all -- no dropdown, even if
                 # an old file carries a stray PASS/FAIL in the cell.
                 if row in na_value_rows:
+                    continue
+                # Driver monitoring General requirements that also accept N/A
+                # get their own PASS/FAIL/N/A dropdown.
+                if (
+                    ws.title == "DE - DM verif."
+                    and scenario_col_idx is not None
+                    and str(
+                        ws.cell(row=row, column=scenario_col_idx).value or ""
+                    ).strip()
+                    in driver_monitoring.GENERAL_REQUIREMENTS_PASS_FAIL_NA
+                ):
+                    pass_fail_na_cells.append(cell)
                     continue
                 if isinstance(cell.value, str) and cell.value.strip().upper() in [
                     "PASS",
@@ -740,6 +766,13 @@ def write_report(
                 )
                 ws.add_data_validation(dv)
                 for cell in validation_cells:
+                    dv.add(cell)
+            if pass_fail_na_cells:
+                dv = DataValidation(
+                    type="list", formula1='"PASS,FAIL,N/A"', allow_blank=True
+                )
+                ws.add_data_validation(dv)
+                for cell in pass_fail_na_cells:
                     dv.add(cell)
 
     for ws in output_wb.worksheets:

@@ -59,6 +59,7 @@ def _make_input_parameters_df():
                 N,
                 N,
                 N,
+                N,
             ],
             "Stage element": [
                 "Frontal Impact",
@@ -69,6 +70,7 @@ def _make_input_parameters_df():
                 N,
                 N,
                 "Rear Impact",
+                N,
                 "VRU Impact",
                 N,
                 N,
@@ -83,6 +85,7 @@ def _make_input_parameters_df():
                 "Farside",
                 N,
                 "Whiplash",
+                N,
                 "Head Impact",
                 "Pelvis Impact",
                 "Leg Impact",
@@ -95,8 +98,9 @@ def _make_input_parameters_df():
                 N,
                 N,
                 "Countermeasure?",
-                "Red line >125 mm outboard of the orange line",
-                "Torso angle (rear)",
+                "Red line >125 mm outboard of the orange line ?",
+                "Torso angle (rear second row)",
+                "Torso angle (rear third row)",
                 "Number of verification tests (min 10)",
                 "Number of verification tests (min 5)",
                 "Number of verification tests (min 5)",
@@ -111,6 +115,7 @@ def _make_input_parameters_df():
                 "Yes",
                 "Yes",
                 1,
+                "N/A",
                 10,
                 5,
                 5,
@@ -247,8 +252,10 @@ def _make_dummy_scores_df():
             1.5,
         ],
         [N, N, N, "Rear-High", "Driver", "BioRID-50", N, N, 1.5],
-        [N, N, N, "Static-Front", "Front", "HPM", N, N, 1.0],
-        [N, N, N, "Static-Rear", "Rear", "HPM", N, N, 1.0],
+        [N, N, N, "Static-Front", "Driver", "HPM", N, N, 0.5],
+        [N, N, N, N, "Front Passenger", "HPM", N, N, 0.5],
+        [N, N, N, "Static-Rear", "Rear (second row)", "HPM", N, N, 0.5],
+        [N, N, N, N, "Rear (third row)", "HPM", N, N, 0.5],
         # VRU / Head Impact
         [
             "Crash Protection",
@@ -407,8 +414,10 @@ def _make_body_region_scores_df():
         # Rear / Whiplash
         ["Rear Impact",   "Whiplash",  "Rear-Mid",    "Driver",                "BioRID-50",          "Neck",                  N, N, 0, N, 1.5],
         [N,               N,           "Rear-High",   "Driver",                "BioRID-50",          "Neck",                  N, N, 0, N, 1.5],
-        [N,               N,           "Static-Front","Front",                 "HPM",                "Neck",                  N, N, 0, N, 1.0],
-        [N,               N,           "Static-Rear", "Rear",                  "HPM",                "Neck",                  N, N, 0, N, 1.0],
+        [N,               N,           "Static-Front","Driver",                "HPM",                "Neck",                  N, N, 0, N, 0.5],
+        [N,               N,           N,             "Front Passenger",       "HPM",                "Neck",                  N, N, 0, N, 0.5],
+        [N,               N,           "Static-Rear", "Rear (second row)",     "HPM",                "Neck",                  N, N, 0, N, 0.5],
+        [N,               N,           N,             "Rear (third row)",      "HPM",                "Neck",                  N, N, 0, N, 0.5],
         # VRU / Head Impact
         ["VRU Impact",    "Head Impact","Headform",    "Driver",                "Adult Headform",     "Cyclist",               N, N, 0, N, N],
         [N,               N,           N,             N,                       N,                    "Adult",                 N, N, 0, N, N],
@@ -986,12 +995,18 @@ def _make_rear_whiplash_df(value):
         [N,             N,       N,          N,     "Effective height modifier",           N,       N,    N,    1000],
         [N,             N,       N,          N,     "Backset - Test position",            45.0,   45.0,   N,      0],
         [N,             N,       N,          N,     "Backset - Lowest and rearmost",      70.0,   70.0,   N,      0],
-        # Static-Rear
-        ["Static-Rear", "Rear",  "HPM",      "Neck","Effective height - Lowest",         720.0,  719.99,  N,    1000],
+        # Static-Rear (second row scores the whole point: no third row, see
+        # the N/A third-row torso angle; non-use position PASS = 1000)
+        ["Static-Rear", "Rear (second row)", "HPM", "Neck", "Effective height - Lowest", 720.0, 719.99, N, 1000],
         [N,             N,       N,          N,     "Effective height - Highest",         770.0,  769.99,  N,    1000],
-        [N,             N,       N,          N,     "Effective height modifier",           N,       N,    N,    1000],
+        [N,             N,       N,          N,     "Non-Use position",                    N,       N,    N,    1000],
         [N,             N,       N,          N,     "Backset - Lowest",                  160.128,160.128,  N,      0],
         [N,             N,       N,          N,     "Backset - Mid",                     160.128,160.128,  N,      0],
+        [N,             "Rear (third row)", "HPM", "Neck", "Effective height - Lowest",  720.0,  719.99,  N,       N],
+        [N,             N,       N,          N,     "Effective height - Highest",         770.0,  769.99,  N,       N],
+        [N,             N,       N,          N,     "Non-Use position",                    N,       N,    N,       N],
+        [N,             N,       N,          N,     "Backset - Lowest",                    0.0,     0.0,  N,       N],
+        [N,             N,       N,          N,     "Backset - Mid",                       0.0,     0.0,  N,       N],
     ]
     # fmt: on
     return pd.DataFrame(rows, columns=cols)
@@ -1052,10 +1067,15 @@ def _make_rear_whiplash_df_min():
         [N,             N,       N,          N,     "Effective height modifier",           N,       N,    N,      0],
         [N,             N,       N,          N,     "Backset - Test position",            45.0,   45.0,   N,   5000],
         [N,             N,       N,          N,     "Backset - Lowest and rearmost",      70.0,   70.0,   N,   5000],
-        # Static-Rear: effective height rows pass, backset rows fail
-        ["Static-Rear", "Rear",  "HPM",      "Neck","Effective height - Lowest",         720.0,  719.99,  N,      0],
+        # Static-Rear: effective height rows fail, backset rows fail
+        ["Static-Rear", "Rear (second row)", "HPM", "Neck", "Effective height - Lowest", 720.0, 719.99, N, 0],
         [N,             N,       N,          N,     "Effective height - Highest",         770.0,  769.99,  N,      0],
-        [N,             N,       N,          N,     "Effective height modifier",           N,       N,    N,      0],
+        [N,             N,       N,          N,     "Non-Use position",                    N,       N,    N,      0],
+        [N,             N,       N,          N,     "Backset - Lowest",                    0.0,     0.0,  N,   5000],
+        [N,             N,       N,          N,     "Backset - Mid",                       0.0,     0.0,  N,   5000],
+        [N,             "Rear (third row)", "HPM", "Neck", "Effective height - Lowest",  720.0,  719.99,  N,      0],
+        [N,             N,       N,          N,     "Effective height - Highest",         770.0,  769.99,  N,      0],
+        [N,             N,       N,          N,     "Non-Use position",                    N,       N,    N,      0],
         [N,             N,       N,          N,     "Backset - Lowest",                    0.0,     0.0,  N,   5000],
         [N,             N,       N,          N,     "Backset - Mid",                       0.0,     0.0,  N,   5000],
     ]
@@ -1323,7 +1343,8 @@ class TestCrashProtectionFileScore(unittest.TestCase):
 
         input_parameters_df = _make_input_parameters_df().copy()
         input_parameters_df.loc[
-            input_parameters_df["Input parameter"] == "Torso angle (rear)", "Value"
+            input_parameters_df["Input parameter"] == "Torso angle (rear second row)",
+            "Value",
         ] = 25
         dfs["Input parameters"] = input_parameters_df
 
@@ -1358,6 +1379,49 @@ class TestCrashProtectionFileScore(unittest.TestCase):
                 "not recomputed from torso angle at scoring time"
             ),
         )
+
+    def _score_rear_high_neck(self, seatback_deflection):
+        """Rear-High pulse with NIC yellow (80), Upper Neck Fx (+) yellow (80),
+        Upper Neck Fz green (100) and every other capping row below its limit.
+        Returns the Rear-High rows of 'CP - Body region scores' (Neck) and
+        'CP - Dummy Scores'."""
+        dfs = _make_dfs_max()
+        df = _make_rear_whiplash_df(value=0).copy()
+        df["Value"] = df["Value"].astype(float)
+        high = df.index[df["Loadcase"] == "Rear-High"][0]
+        static = df.index[df["Loadcase"] == "Static-Front"][0]
+        rows = df.loc[high : static - 1]
+        for criteria, value in (
+            ("NIC", 13.64),
+            ("Upper Neck Fx (+)", 42.95),
+            ("Upper Neck Fz", 295.5),
+            ("Seatback deflection", seatback_deflection),
+        ):
+            df.loc[rows.index[rows["Criteria"] == criteria], "Value"] = value
+        dfs["CP - Rear Whiplash"] = df
+
+        result = calculate_score(dfs)
+        regions = result["CP - Body region scores"]
+        dummies = result["CP - Dummy Scores"]
+        return (
+            regions[regions["Loadcase"] == "Rear-High"].iloc[0],
+            dummies[dummies["Loadcase"] == "Rear-High"].iloc[0],
+        )
+
+    def test_whiplash_blank_seatback_deflection_not_averaged(self):
+        """Seatback deflection is a capping-only criterion (32 deg, High
+        pulse) and carries no points, so a blank value must not enter the
+        Neck average: (80 + 80 + 100) / 3 = 86.67 % -> 1.3 of 1.5 points."""
+        neck, dummy = self._score_rear_high_neck(seatback_deflection=N)
+        self.assertAlmostEqual(neck["Body regionscore"], 86.667, places=3)
+        self.assertAlmostEqual(neck["Score"], 1.3, places=3)
+        self.assertAlmostEqual(dummy["Score"], 1.3, places=3)
+
+    def test_whiplash_seatback_deflection_at_capping_limit_still_caps(self):
+        """A seatback deflection of 40 deg (>= 32 deg) still caps the pulse."""
+        _, dummy = self._score_rear_high_neck(seatback_deflection=40.0)
+        self.assertEqual(dummy["Capping?"], "Capped")
+        self.assertEqual(dummy["Score"], 0)
 
     def test_hpl_lpl_tamper_reaching_calculate_score_directly_is_neutralized(self):
         """Regression test: callers may never
@@ -1416,7 +1480,9 @@ class TestAddVruSheetsToDfsRebuildsTrustedInput(unittest.TestCase):
     tampered "Input parameters" sheet, exactly like rebuild_trusted_input
     already does for the file-based preprocess() CLI command."""
 
-    def test_reordered_input_parameters_rows_are_rejected(self):
+    def test_unknown_input_parameters_row_is_rejected(self):
+        # "Input parameters" rows are matched by label, so the tampering
+        # that must be caught here is a row the official template lacks.
         from importlib.resources import files
 
         from euroncap_rating_2026 import common
@@ -1427,7 +1493,7 @@ class TestAddVruSheetsToDfsRebuildsTrustedInput(unittest.TestCase):
         pristine_path = str(files("data").joinpath("cp_template.xlsx"))
         dfs = common.read_excel_file_to_dfs(pristine_path)
         input_parameters = dfs["Input parameters"].copy()
-        input_parameters.iloc[[0, 1]] = input_parameters.iloc[[1, 0]].values
+        input_parameters.loc[0, "Input parameter"] = "Not a template parameter"
         dfs["Input parameters"] = input_parameters
 
         with self.assertRaises(common.TemplateIntegrityError):

@@ -7,6 +7,8 @@
 from enum import Enum
 import pandas as pd
 
+from euroncap_rating_2026 import common
+
 # Sheet -> columns where a literal "N/A" is protocol-meaningful (the Input
 # parameters "Prediction - Standard/Extended", "Extended range performance"
 # and "Vehicle response" dropdowns offer it) and must survive pd.read_excel's
@@ -200,6 +202,139 @@ SUBTEST_TO_COLLISION_PARTNER = {
 # 50% impact location (CCFhos's 4 matrix columns are the 100%/75%/50%/25%
 # impact locations -- see the CCFhos table in 3.1.1.2).
 CCFHOS_PINNED_TEST_POINT = (0, 2)
+
+
+def _matrix_cells(rows: list, cols: list, **shared) -> list:
+    """Every (row, col) cell of a prediction matrix as one run-attribute dict:
+    the row's attributes merged with the column's, plus *shared* attributes
+    that hold for the whole matrix."""
+    return [{**shared, **row, **col} for row in rows for col in cols]
+
+
+def _speed_rows(vut_speeds, target_speeds=None) -> list:
+    """One row dict per VUT speed; *target_speeds* pairs each row with its
+    Target speed (defaults to the VUT speed, as in the Rear scenarios)."""
+    if target_speeds is None:
+        target_speeds = vut_speeds
+    return [
+        {"VUT speed": f"{vut} km/h", "Target speed": f"{target} km/h"}
+        for vut, target in zip(vut_speeds, target_speeds)
+    ]
+
+
+def _cols(key: str, values) -> list:
+    return [{key: value} for value in values]
+
+
+# Corner Cases, enumerated cell by cell as the run attributes a verification
+# row carries (the same keys/values matrix_processing writes into the
+# "... verif." sheets: "VUT speed", "Target speed", "Impact location",
+# "Lateral velocity", "Function"). The random "Target approach" of
+# CCCscp/CMCscp is deliberately absent so it can never take part in a match.
+#
+# Source (v1.2, July 2026): CA Frontal Collisions 4.1.3, CA Lane Departure
+# Collisions 4.1.3, CA Low Speed Collisions 4.1.2 -- "cases excluded from the
+# regular verification testing conducted by the test laboratory", for which
+# the Vehicle Manufacturer supplies evidence instead:
+#   CCRb: GVT speed > 100 km/h; CCFhos/hol: all cases; CMRb: EMT speed
+#   > 80 km/h; CCFtap, CMFtap, CCCscp, CMCscp: target speed > 60 km/h;
+#   ELK Car-to-Motorcyclist On/Ov: EMT speed > 80 km/h; ELK Car-to-Car Ov:
+#   GVT speed > 100 km/h; ELK RE: VUT speed > 80 km/h; LSC CMFtap/CMCscp:
+#   target speed > 60 km/h.
+# The Car-to-Car ELK clause is not in the printed LDC 4.1.3 list: Euro NCAP
+# confirmed its absence is a typo and that the CCRb rule (> 100 km/h GVT
+# speed) applies there too.
+# "GVT speed"/"EMT speed" are the "Target speed" attribute. Scenarios absent
+# from this dict (CCRs, CCRm, CMRs, CC ELK On/OvI, CCCscp/CCFtap SfS, all Ped
+# & Cyc) have no Corner Cases -- CC ELK On and OvI stop at 100 km/h target
+# speed, so the > 100 rule selects nothing there.
+# tests/crash_avoidance/test_corner_case_cells.py derives this enumeration
+# from the packaged template and pins it.
+_IMPACT_LOCATIONS_CCF = ("100%", "75%", "50%", "25%")
+_LATERAL_VELOCITIES_ELK = (
+    "0.2 m/s",
+    "0.3 m/s",
+    "0.4 m/s",
+    "0.5 m/s",
+    "0.6 m/s",
+    "0.7 m/s",
+)
+
+CORNER_CASE_CELLS = {
+    "CCRb": _matrix_cells(
+        _speed_rows((110, 120, 130)),
+        _cols("Impact location", ("125%", "100%", "75%", "50%", "25%", "0%", "-25%")),
+        Function="AEB",
+    ),
+    "CCFhos": _matrix_cells(
+        _speed_rows(
+            (30, 40, 50, 60, 70, 80, 90, 100), (50, 50, 50, 70, 70, 70, 90, 100)
+        ),
+        _cols("Impact location", _IMPACT_LOCATIONS_CCF),
+    ),
+    "CCFhol": _matrix_cells(
+        _speed_rows(
+            (30, 40, 50, 60, 70, 80, 90, 100), (50, 50, 50, 70, 70, 70, 90, 100)
+        ),
+        _cols("Impact location", _IMPACT_LOCATIONS_CCF),
+    ),
+    "CMRb": _matrix_cells(
+        _speed_rows((90, 100, 110, 120, 130)),
+        _cols("Impact location", ("90%", "75%", "50%", "25%", "10%")),
+        Function="AEB",
+    ),
+    # Cells blanked out of the parsed matrix by
+    # matrix_processing.CELL_REMOVAL_MAP are not protocol cells and are left
+    # out: the CCFtap/CMFtap 70 km/h column (so 80 km/h is their only Corner
+    # Case column) and, for CCCscp/CMCscp, every 70/80 km/h cell above
+    # VUT 30 km/h.
+    "CCFtap": _matrix_cells(
+        _cols("VUT speed", ("10 km/h", "15 km/h", "20 km/h", "25 km/h")),
+        _cols("Target speed", ("80 km/h",)),
+    ),
+    "CMFtap": _matrix_cells(
+        _cols("VUT speed", ("10 km/h", "15 km/h", "20 km/h", "25 km/h")),
+        _cols("Target speed", ("80 km/h",)),
+    ),
+    "CCCscp": _matrix_cells(
+        _cols("VUT speed", ("20 km/h", "30 km/h")),
+        _cols("Target speed", ("70 km/h", "80 km/h")),
+        Function="AEB",
+    ),
+    "CMCscp": _matrix_cells(
+        _cols("VUT speed", ("20 km/h", "30 km/h")),
+        _cols("Target speed", ("70 km/h", "80 km/h")),
+        Function="AEB",
+    ),
+    "ELK RE": _matrix_cells(
+        _cols("VUT speed", ("90 km/h", "100 km/h")),
+        _cols("Lateral velocity", _LATERAL_VELOCITIES_ELK),
+    ),
+    "CC ELK OvU": _matrix_cells(
+        _speed_rows((100, 110, 120, 130), (110, 120, 130, 140)),
+        _cols("Lateral velocity", _LATERAL_VELOCITIES_ELK),
+    ),
+    "CM ELK On": _matrix_cells(
+        _speed_rows((90, 100)),
+        _cols("Lateral velocity", ("0.3 m/s", "0.4 m/s", "0.5 m/s", "0.6 m/s")),
+    ),
+    "CM ELK OvU": _matrix_cells(
+        _speed_rows((80, 90, 100, 110, 120, 130), (90, 100, 110, 120, 130, 140)),
+        _cols("Lateral velocity", _LATERAL_VELOCITIES_ELK),
+    ),
+    "CM ELK OvI": _matrix_cells(
+        _speed_rows((80, 90), (90, 100)),
+        _cols(
+            "Lateral velocity", ("0.4 m/s", "0.5 m/s", "0.6 m/s", "0.7 m/s", "0.8 m/s")
+        ),
+    ),
+    "CMCscp SfS": _matrix_cells(
+        [{"VUT speed": "SfS"}], _cols("Target speed", ("70 km/h", "80 km/h"))
+    ),
+    "CMFtap SfS": _matrix_cells(
+        [{"VUT speed": "SfS"}], _cols("Target speed", ("80 km/h",))
+    ),
+}
 
 EXTENDED_RANGE_CELLS = {
     "CCRs": [
@@ -562,6 +697,39 @@ class VehicleResponse(str, Enum):
     RETENTION = "Retention"
 
 
+# LSC colour rank: the score weight of each colour band. Lower is worse. Shared
+# by the CBDA prediction-consistency check (a prediction may be equal to or
+# worse than what the claimed Vehicle response can achieve), the door-based
+# ceiling in scoring (worst_of(ceiling, OEM prediction)) and the LSC score
+# itself, so the three cannot drift.
+LSC_COLOR_RANK = {
+    common.PredictionColor.GREEN: 1.0,
+    common.PredictionColor.YELLOW: 0.75,
+    common.PredictionColor.ORANGE: 0.5,
+    common.PredictionColor.BROWN: 0.25,
+    common.PredictionColor.RED: 0.0,
+}
+
+# CBDA "Door selected": the four values the tool ever assigns. Kept here rather
+# than in test_info so the scoring side (matrix_processing) can recognise them
+# without importing test_info, which imports matrix_processing.
+DRIVER_DOOR = "Driver"
+NON_DRIVER_DOORS = ("Passenger", "Behind driver", "Behind passenger")
+# Lowercased, for tolerant comparison against a hand-edited cell.
+NON_DRIVER_DOORS_NORMALIZED = frozenset(door.lower() for door in NON_DRIVER_DOORS)
+ALL_DOORS = (DRIVER_DOOR,) + NON_DRIVER_DOORS
+
+
+# The best colour a CBDA (LSC dooring) system of each claimed Vehicle response
+# can achieve: Information -> Brown, Warning -> Yellow (all doors),
+# Retention -> Green (all doors).
+VEHICLE_RESPONSE_BEST_COLOR = {
+    VehicleResponse.INFORMATION: common.PredictionColor.BROWN,
+    VehicleResponse.WARNING: common.PredictionColor.YELLOW,
+    VehicleResponse.RETENTION: common.PredictionColor.GREEN,
+}
+
+
 class NcapTestCriteria(str, Enum):
     UNKNOWN = "Unknown"
     MITIGATION_OR_AVOIDANCE = "mitigation or avoidance"
@@ -643,7 +811,9 @@ NCAP_TEST_CRITERIA_TO_SCORE_PARAMETER = {
     NcapTestCriteria.ELK_TARGET: "impact_occurred",
     NcapTestCriteria.LSC_AVOIDANCE: "v_impact",
     NcapTestCriteria.LSC_MITIGATION: "v_impact",
-    NcapTestCriteria.LSC_DOORING: "TTC @ t_door_opening",
+    # Generic: the MME decides which dooring TTC (t_door_opening, t_warning,
+    # t_information) it produced; the row no longer names one.
+    NcapTestCriteria.LSC_DOORING: "TTC",
 }
 
 # Tolerance (in the unit of the criteria's KPI above) applied to the OEM's

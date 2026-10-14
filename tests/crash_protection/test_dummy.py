@@ -587,5 +587,95 @@ class TestBioRID50CoupledCapping(unittest.TestCase):
         self.assertTrue(dummy.get_capping())
 
 
+class TestWorldSID50PoleAresCappingGate(unittest.TestCase):
+    """The side pole head `Ares` capping is ignored when HIC15 stays low: a peak
+    Ares with a low HIC15 comes from the arm hitting the head, not from the head
+    hitting the pole. The gate is restricted to the pole load case; the AE-MDB
+    and far side load cases keep the unconditional Ares capping."""
+
+    @staticmethod
+    def _make_df(ares, hic15, contact=False):
+        """A WorldSID-50 driver head block as the side pole sheet carries it."""
+        return pd.DataFrame(
+            {
+                "Dummy": ["WorldSID-50", None, None, None],
+                "Body region": ["Head", None, None, None],
+                "Criteria": [
+                    "Ares",
+                    "HIC15",
+                    "Ares-3ms",
+                    "Direct contact with pole",
+                ],
+                "HPL": [None, 500.0, 72.0, None],
+                "LPL": [None, 700.0, 80.0, None],
+                "Capping": [80.0, 700.0, 80.0, None],
+                "Value": [ares, hic15, 70.51, contact],
+            }
+        )
+
+    @staticmethod
+    def _capping(df, load_case_name=None):
+        """Reproduce the deployed decision: the inspection route caps up front,
+        otherwise the criteria capping flags are OR-ed into the dummy."""
+        dummy, _ = Dummy.get_dummy_from_row(
+            "WorldSID-50", df, 0, load_case_name=load_case_name
+        )
+        if not dummy.get_capping():
+            dummy.compute_capping()
+        return dummy.get_capping()
+
+    def test_pole_low_hic15_does_not_cap(self):
+        """Pole, Ares 81.91 g with HIC15 376.86: arm-to-head contact, no capping."""
+        df = self._make_df(81.91, 376.86)
+        self.assertFalse(self._capping(df, "Pole-32"))
+
+    def test_pole_low_hic15_still_caps_on_direct_contact(self):
+        """The inspector's contact flag caps regardless of HIC15."""
+        df = self._make_df(81.91, 376.86, contact=True)
+        self.assertTrue(self._capping(df, "Pole-32"))
+
+    def test_pole_hic15_at_gate_caps(self):
+        """HIC15 exactly at the gate is not below it, so the capping stands."""
+        df = self._make_df(81.91, 500.0)
+        self.assertTrue(self._capping(df, "Pole-32"))
+
+    def test_pole_high_hic15_caps(self):
+        """HIC15 above the gate means real head contact: still capped."""
+        df = self._make_df(81.91, 600.0)
+        self.assertTrue(self._capping(df, "Pole-32"))
+
+    def test_pole_missing_hic15_caps(self):
+        """A missing HIC15 is not a low one: no silent un-capping."""
+        df = self._make_df(81.91, np.nan)
+        self.assertTrue(self._capping(df, "Pole-32"))
+
+    def test_pole_ares_below_capping_value_not_capped(self):
+        """Below 80 g there is nothing to gate."""
+        df = self._make_df(79.99, 376.86)
+        self.assertFalse(self._capping(df, "Pole-32"))
+
+    def test_pole_ares_exactly_at_capping_value_with_high_hic15_caps(self):
+        """Ares exactly at 80.00 g still caps."""
+        df = self._make_df(80.0, 600.0)
+        self.assertTrue(self._capping(df, "Pole-32"))
+
+    def test_aemdb_low_hic15_still_caps(self):
+        """The AE-MDB load case is unchanged by the gate."""
+        df = self._make_df(81.91, 376.86)
+        self.assertTrue(self._capping(df, "AEMDB-60"))
+
+    def test_farside_main_load_cases_still_cap(self):
+        """The far side main load cases are unchanged by the gate."""
+        for load_case_name in ("Main-AEMDB", "Main-Pole"):
+            with self.subTest(load_case=load_case_name):
+                df = self._make_df(81.91, 376.86)
+                self.assertTrue(self._capping(df, load_case_name))
+
+    def test_without_load_case_name_still_caps(self):
+        """Callers that do not pass the load case keep the previous behaviour."""
+        df = self._make_df(81.91, 376.86)
+        self.assertTrue(self._capping(df))
+
+
 if __name__ == "__main__":
     unittest.main()

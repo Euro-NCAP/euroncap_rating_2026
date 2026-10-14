@@ -303,6 +303,67 @@ class TestGeneralRequirementsCheck(unittest.TestCase):
             self.assertEqual(value, 0.0)
 
 
+class TestGeneralRequirementsSystemUpdates(unittest.TestCase):
+    """A failed SLIF general requirement gives 0 on SLIF - System updates too:
+    the fresh-template row must not stay unassessed, and a Scenario Scores
+    sheet stamped by an earlier PASS calculation must not keep its points."""
+
+    def _system_updates_score(self, general_req_value, stored_score=np.nan):
+        prediction_df = TestPreprocess()._create_prediction_df()
+        input_params_df = pd.DataFrame(
+            {
+                "Category": ["Speed control function", "SLIF - System updates"],
+                "Input parameter": ["Type of system", "Type of system"],
+                "Value": ["iacc", "Continuous"],
+            }
+        )
+        scenario_scores_df = pd.DataFrame(
+            {
+                "Category": ["Speed control function", "SLIF - System updates", ""],
+                "Scenario": ["Speedometer accuracy", "", ""],
+                "Score": [np.nan, np.nan, np.nan],
+            }
+        )
+        verification_df, scenario_scores_df = speed_assistance.preprocess(
+            {
+                "VA - Speed assist. pred.": prediction_df,
+                "Input parameters": input_params_df,
+                "Scenario Scores": scenario_scores_df,
+            }
+        )
+        verification_df.loc[
+            verification_df["Category"] == "SLIF - General requirements", "Value"
+        ] = general_req_value
+        scenario_scores_df.loc[
+            scenario_scores_df["Category"] == "SLIF - System updates", "Score"
+        ] = stored_score
+        dfs = {
+            "VA - Speed assist. pred.": prediction_df,
+            "VA - Speed assist. verif.": verification_df,
+            "Input parameters": input_params_df,
+            "Scenario Scores": scenario_scores_df,
+        }
+        _, scenario_scores_df, _, _ = speed_assistance.compute_score(dfs)
+        row = scenario_scores_df[
+            scenario_scores_df["Category"] == "SLIF - System updates"
+        ]
+        return row["Score"].iloc[0]
+
+    def test_fail_scores_continuous_system_updates_zero(self):
+        score = self._system_updates_score("FAIL")
+        self.assertFalse(pd.isna(score))
+        self.assertEqual(score, 0.0)
+
+    def test_fail_overwrites_previously_stored_system_updates_points(self):
+        self.assertEqual(self._system_updates_score("FAIL", stored_score=2.0), 0.0)
+
+    def test_blank_leaves_system_updates_unassessed(self):
+        self.assertTrue(pd.isna(self._system_updates_score("")))
+
+    def test_pass_scores_continuous_system_updates_two(self):
+        self.assertEqual(self._system_updates_score("PASS"), 2.0)
+
+
 class TestSLIFAccuracyScoring(unittest.TestCase):
     """Test SLIF Accuracy scoring (Distance based KPI, Event Based KPI)."""
 
@@ -843,6 +904,44 @@ class TestSlifAdvancedSpeedLimitGrouping(unittest.TestCase):
             self._value_for(
                 verification_df,
                 "Conditional speed limits - Non-lane relevant arrows",
+            ),
+            "PASS",
+        )
+
+    def test_unknown_text_in_member_state_fails_the_gate(self):
+        """Text other than Green/Red (a pasted or programmatically written
+        value) is not a blank N/A: in a member state it fails the gate."""
+        values = ["Green"] * 29
+        values[0] = "Yellow"  # Austria, a member state
+        verification_df = self._preprocess({"Rain / Wetness": values})
+        self.assertEqual(
+            self._value_for(
+                verification_df, "Conditional speed limits - Rain / Wetness"
+            ),
+            "FAIL",
+        )
+
+    def test_unknown_text_does_not_count_toward_application_area(self):
+        # 10 member states Green; among 19 others: 4 Green, 1 typo, 14 Red.
+        # Were the typo counted as blank: 10+4+1=15 >= 14.5 -> PASS.
+        values = ["Green"] * 10 + ["Green"] * 4 + ["Gren"] + ["Red"] * 14
+        verification_df = self._preprocess({"Rain / Wetness": values})
+        self.assertEqual(
+            self._value_for(
+                verification_df, "Conditional speed limits - Rain / Wetness"
+            ),
+            "FAIL",
+        )
+
+    def test_na_and_dash_member_state_cells_stay_not_applicable(self):
+        values = ["Green"] * 29
+        values[0] = "N/A"
+        values[1] = "-"
+        values[2] = " "
+        verification_df = self._preprocess({"Rain / Wetness": values})
+        self.assertEqual(
+            self._value_for(
+                verification_df, "Conditional speed limits - Rain / Wetness"
             ),
             "PASS",
         )

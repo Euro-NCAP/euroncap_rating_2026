@@ -7,6 +7,8 @@
 import unittest
 import random
 import re
+from importlib.resources import files
+
 from euroncap_rating_2026.safe_driving import driver_monitoring
 from euroncap_rating_2026 import common
 import numpy as np
@@ -408,45 +410,6 @@ class TestDrivingMonitoring(unittest.TestCase):
             "Manually-selected Forward support row should carry the drawn scenario",
         )
 
-    def test_clean_df_warning_score_phone_use_intervention_independent(self):
-        """Phone use warning=0 must NOT zero out the intervention score (no cascade)."""
-        df = pd.DataFrame(
-            {
-                "Category": ["Transient - Phone use", "Transient - Phone use"],
-                "Scenario": [
-                    "Basic phone use - Owl and lizard - Warning",
-                    "Basic phone use - Owl and lizard - Intervention",
-                ],
-                "Score": [0.0, 1.25],
-            }
-        )
-        result = driver_monitoring.clean_df_warning_score(df)
-        intervention_score = result.loc[
-            result["Scenario"].str.endswith("Intervention"), "Score"
-        ].values[0]
-        self.assertEqual(intervention_score, 1.25)
-
-    def test_clean_df_warning_score_long_distraction_cascade_applies(self):
-        """Long distraction warning=0 MUST zero out the intervention score (cascade applies)."""
-        df = pd.DataFrame(
-            {
-                "Category": [
-                    "Transient - Long distraction",
-                    "Transient - Long distraction",
-                ],
-                "Scenario": [
-                    "Non-driving task - Owl - Warning",
-                    "Non-driving task - Owl - Intervention",
-                ],
-                "Score": [0.0, 0.5],
-            }
-        )
-        result = driver_monitoring.clean_df_warning_score(df)
-        intervention_score = result.loc[
-            result["Scenario"].str.endswith("Intervention"), "Score"
-        ].values[0]
-        self.assertEqual(intervention_score, 0.0)
-
     # ------------------------------------------------------------------
     # Bug 1: Driving task Intervention — prediction-only scoring
     # ------------------------------------------------------------------
@@ -741,58 +704,6 @@ class TestDrivingMonitoring(unittest.TestCase):
         score = result.loc[result["Scenario"] == "Warning", "Score"].values[0]
         self.assertTrue(pd.isna(score))
 
-    # ------------------------------------------------------------------
-    # Bug 3: Long Distraction cascade — skip when Intervention is verified
-    # ------------------------------------------------------------------
-
-    def test_clean_df_warning_score_cascade_skipped_when_intervention_verified(self):
-        """Bug 3: Long Distraction cascade must NOT zero out Intervention when it was
-        independently verified (present in verified_scenarios)."""
-        category = "Transient - Long distraction"
-        intervention_scenario = "Non-driving task - Owl - Intervention"
-        df = pd.DataFrame(
-            {
-                "Category": [category, category],
-                "Scenario": ["Non-driving task - Owl - Warning", intervention_scenario],
-                "Score": [0.0, 0.9],
-            }
-        )
-        verified_scenarios = {(category, intervention_scenario)}
-        result = driver_monitoring.clean_df_warning_score(df, verified_scenarios)
-        score = result.loc[result["Scenario"] == intervention_scenario, "Score"].values[
-            0
-        ]
-        self.assertEqual(
-            score,
-            0.9,
-            "Cascade must be skipped when Intervention was independently verified",
-        )
-
-    def test_clean_df_warning_score_cascade_applies_when_intervention_not_verified(
-        self,
-    ):
-        """Bug 3: Long Distraction cascade MUST zero out Intervention when it was NOT
-        independently verified (absent from verified_scenarios)."""
-        category = "Transient - Long distraction"
-        intervention_scenario = "Non-driving task - Owl - Intervention"
-        df = pd.DataFrame(
-            {
-                "Category": [category, category],
-                "Scenario": ["Non-driving task - Owl - Warning", intervention_scenario],
-                "Score": [0.0, 0.9],
-            }
-        )
-        verified_scenarios = set()  # Intervention not in the set
-        result = driver_monitoring.clean_df_warning_score(df, verified_scenarios)
-        score = result.loc[result["Scenario"] == intervention_scenario, "Score"].values[
-            0
-        ]
-        self.assertEqual(
-            score,
-            0.0,
-            "Cascade must zero out Intervention when it was not independently verified",
-        )
-
     def test_compute_non_transient_score_impairment_scores_zero_when_no_prediction_data(
         self,
     ):
@@ -826,6 +737,91 @@ class TestDrivingMonitoring(unittest.TestCase):
         self.assertEqual(
             score, 0.0, "Impairment must not score when dm_colors has no entries"
         )
+
+    def _score_non_transient_intervention(self, task, vehicle_response, value):
+        """Score one non-transient Intervention whose verification row is built
+        exactly as the preprocess writes it (Scenario "Intervention")."""
+
+        class FakeTP:
+            pass
+
+        fake = FakeTP()
+        fake.driver_state = "Non-transient"
+        fake.name = "Non-transient"
+        fake.processed_df = pd.DataFrame(
+            {
+                "Non transient": [task],
+                "": [""],
+                "Impairment type": [None],
+                "Warning": [None],
+                "Forward and lane support": [None],
+                "Emergency function": [None],
+            }
+        )
+
+        rows = driver_monitoring.get_verification_rows(
+            fake,
+            {(0, 0): {"Task": task, "Vehicle response": vehicle_response}},
+            non_transient=True,
+        )
+        non_transient_df = pd.DataFrame(rows)
+        non_transient_df["Value"] = value
+        self.assertEqual(non_transient_df["Scenario"].tolist(), ["Intervention"])
+
+        non_transient_score_df = pd.DataFrame(
+            {
+                "Category": [f"Non-transient - {task}"],
+                "Scenario": ["Intervention"],
+                "Score": [0.0],
+            }
+        )
+        dm_colors = {
+            0: {vehicle_response: driver_monitoring.common.PredictionColor.GREEN}
+        }
+
+        with patch.object(driver_monitoring, "TableProcessor", return_value=fake):
+            result = driver_monitoring.compute_non_transient_score(
+                non_transient_df, pd.DataFrame(), dm_colors, non_transient_score_df
+            )
+        return result["Score"].values[0]
+
+    def test_compute_non_transient_score_sleep_intervention_fail_scores_zero(self):
+        """A failed Sleep forward/lane support spot check must not earn the
+        Intervention points, even with a GREEN prediction."""
+        score = self._score_non_transient_intervention(
+            "Sleep", "Forward and lane support", "FAIL"
+        )
+        self.assertEqual(score, 0.0)
+
+    def test_compute_non_transient_score_microsleep_intervention_fail_scores_zero(
+        self,
+    ):
+        score = self._score_non_transient_intervention(
+            "Microsleep", "Forward and lane support", "FAIL"
+        )
+        self.assertEqual(score, 0.0)
+
+    def test_compute_non_transient_score_unresponsive_emergency_fail_scores_zero(
+        self,
+    ):
+        score = self._score_non_transient_intervention(
+            "Unresponsive", "Emergency function", "FAIL"
+        )
+        self.assertEqual(score, 0.0)
+
+    def test_compute_non_transient_score_sleep_intervention_pass_scores_full(self):
+        score = self._score_non_transient_intervention(
+            "Sleep", "Forward and lane support", "PASS"
+        )
+        self.assertEqual(score, 1.5)
+
+    def test_compute_non_transient_score_unresponsive_emergency_pass_scores_full(
+        self,
+    ):
+        score = self._score_non_transient_intervention(
+            "Unresponsive", "Emergency function", "PASS"
+        )
+        self.assertEqual(score, 2.0)
 
 
 class TestComputeTransientScoreIntervention(unittest.TestCase):
@@ -1097,9 +1093,11 @@ class TestComputeTransientScoreIntervention(unittest.TestCase):
         )
 
     # ------------------------------------------------------------------
-    # New Euro NCAP requirement: Warning predictions all GREEN but a
-    # verification test failed -> force FS/LS to 0 for that movement type
-    # (Long distraction: both FS and LS; Short distraction: LS only).
+    # Step 7: Warning predictions all GREEN but a Warning verification test
+    # failed. A verified Intervention decides for FS and LS by its own
+    # outcome; an unverified one loses FS+LS (Long distraction) or LS only
+    # (Short distraction, Phone use). A RED Warning prediction costs the
+    # Warning points only.
     # ------------------------------------------------------------------
 
     def _make_dm_prediction_df_for_category(
@@ -1144,9 +1142,181 @@ class TestComputeTransientScoreIntervention(unittest.TestCase):
             ]
         )
 
-    def test_long_distraction_warning_green_but_test_failed_zeroes_fs_and_ls(self):
-        """Warning predictions GREEN but the Warning test FAILs -> Intervention forced to
-        0 even though FS/LS have their own independently-passing verification."""
+    def _verification_row(self, category, scenario, requirement, value):
+        glance_target_type, movement_type = scenario.split(" - ")[:2]
+        return {
+            "Category": f"Transient - {category}",
+            "Scenario": scenario,
+            "Glance target type": glance_target_type,
+            "Movement type": movement_type,
+            "Requirement": requirement,
+            "Value": value,
+        }
+
+    def _intervention_score(
+        self,
+        category,
+        glance_target_type,
+        movement_type,
+        warning_color,
+        verification_rows,
+        scenario_prefix=None,
+        score_df=None,
+    ):
+        idx = self._DATA_ROW_IDX
+        dm_colors = {
+            idx: {
+                "Warning": warning_color,
+                "Forward support": common.PredictionColor.GREEN,
+                "Lane support": common.PredictionColor.GREEN,
+            }
+        }
+        scenario_prefix = scenario_prefix or f"{glance_target_type} - {movement_type}"
+        if score_df is None:
+            score_df = self._score_df_with_warning(
+                category, *scenario_prefix.split(" - ")
+            )
+        transient_df = pd.DataFrame(
+            [self._verification_row(category, *row) for row in verification_rows],
+            columns=[
+                "Category",
+                "Scenario",
+                "Glance target type",
+                "Movement type",
+                "Requirement",
+                "Value",
+            ],
+        )
+        result = driver_monitoring.compute_transient_score(
+            transient_df,
+            self._make_dm_prediction_df_for_category(
+                category, glance_target_type, movement_type
+            ),
+            dm_colors,
+            score_df,
+        )
+        return result.loc[
+            result["Scenario"] == f"{scenario_prefix} - Intervention", "Score"
+        ].values[0]
+
+    def test_long_distraction_red_warning_prediction_keeps_unverified_intervention(
+        self,
+    ):
+        """Long distraction: a RED Warning prediction costs the Warning points only;
+        the all-GREEN, unverified Intervention keeps 0.5."""
+        score = self._intervention_score(
+            "Long distraction",
+            "Non-driving task",
+            "Owl",
+            common.PredictionColor.RED,
+            [],
+        )
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_long_distraction_warning_failed_intervention_unverified_loses_fs_and_ls(
+        self,
+    ):
+        """Long distraction: claimed Warning FAILs its test and the Intervention was
+        not verified -> Forward and Lane support are both lost."""
+        score = self._intervention_score(
+            "Long distraction",
+            "Non-driving task",
+            "Owl",
+            common.PredictionColor.GREEN,
+            [("Non-driving task - Owl - Warning", "Warning", "FAIL")],
+        )
+        self.assertEqual(score, 0.0)
+
+    def test_long_distraction_warning_failed_only_fs_verified_pass_scores_both(self):
+        """Long distraction: claimed Warning FAILs, only Forward support was verified
+        and PASSes -> both Forward and Lane support score (0.5)."""
+        score = self._intervention_score(
+            "Long distraction",
+            "Non-driving task",
+            "Owl",
+            common.PredictionColor.GREEN,
+            [
+                ("Non-driving task - Owl - Warning", "Warning", "FAIL"),
+                ("Non-driving task - Owl - Intervention", "Forward support", "PASS"),
+            ],
+        )
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_long_distraction_warning_failed_fs_verified_fail_loses_both(self):
+        """Long distraction: claimed Warning FAILs and the verified Forward support
+        also FAILs -> both Forward and Lane support are lost."""
+        score = self._intervention_score(
+            "Long distraction",
+            "Non-driving task",
+            "Owl",
+            common.PredictionColor.GREEN,
+            [
+                ("Non-driving task - Owl - Warning", "Warning", "FAIL"),
+                ("Non-driving task - Owl - Intervention", "Forward support", "FAIL"),
+            ],
+        )
+        self.assertEqual(score, 0.0)
+
+    def test_short_distraction_warning_failed_intervention_unverified_loses_ls_only(
+        self,
+    ):
+        """Short distraction: claimed Warning FAILs, Intervention not verified ->
+        Lane support (0.1) lost, Forward support (0.4) kept."""
+        score = self._intervention_score(
+            "Short distraction",
+            "Non-driving task",
+            "Owl",
+            common.PredictionColor.GREEN,
+            [("Non-driving task - Owl - Warning", "Warning", "FAIL")],
+        )
+        self.assertAlmostEqual(score, 0.4)
+
+    def test_phone_use_warning_failed_intervention_unverified_loses_ls_only(self):
+        """Basic phone use: claimed Warning FAILs, Intervention not verified ->
+        Lane support (0.25) lost, Forward support (1.0) kept."""
+        score = self._intervention_score(
+            "Phone use",
+            "Basic phone use",
+            "Owl",
+            common.PredictionColor.GREEN,
+            [("Basic - Owl and lizard - Warning", "Warning", "FAIL")],
+            scenario_prefix="Basic - Owl and lizard",
+        )
+        self.assertAlmostEqual(score, 1.0)
+
+    def test_warning_failed_applies_when_warning_row_follows_intervention(self):
+        """The failed-Warning rule must not depend on the Warning row being listed
+        before the Intervention row (Short distraction: LS lost, FS 0.4 kept)."""
+        category = "Transient - Short distraction"
+        score_df = pd.DataFrame(
+            [
+                {
+                    "Category": category,
+                    "Scenario": "Non-driving task - Owl - Intervention",
+                    "Score": 0.0,
+                },
+                {
+                    "Category": category,
+                    "Scenario": "Non-driving task - Owl - Warning",
+                    "Score": 0.0,
+                },
+            ]
+        )
+        score = self._intervention_score(
+            "Short distraction",
+            "Non-driving task",
+            "Owl",
+            common.PredictionColor.GREEN,
+            [("Non-driving task - Owl - Warning", "Warning", "FAIL")],
+            score_df=score_df,
+        )
+        self.assertAlmostEqual(score, 0.4)
+
+    def test_long_distraction_warning_failed_intervention_verified_pass_scores_both(
+        self,
+    ):
+        """Warning predictions GREEN but the Warning test FAILs, while FS and LS were
+        verified and PASS -> the verified Intervention keeps its full 0.5."""
         idx = self._DATA_ROW_IDX
         dm_colors = {
             idx: {
@@ -1194,7 +1364,7 @@ class TestComputeTransientScoreIntervention(unittest.TestCase):
         intervention_score = result.loc[
             result["Scenario"] == "Non-driving task - Owl - Intervention", "Score"
         ].values[0]
-        self.assertEqual(intervention_score, 0.0)
+        self.assertAlmostEqual(intervention_score, 0.5)
 
     def test_long_distraction_warning_green_and_test_passed_does_not_cascade(self):
         """Regression: Warning test PASSes -> no new cascade, full FS+LS sum awarded."""
@@ -1281,9 +1451,11 @@ class TestComputeTransientScoreIntervention(unittest.TestCase):
         ].values[0]
         self.assertAlmostEqual(intervention_score, 0.5)
 
-    def test_short_distraction_warning_green_but_test_failed_zeroes_ls_only(self):
-        """Short distraction: same hard-fail condition zeroes LS only; FS keeps its own
-        independently-passing score."""
+    def test_short_distraction_warning_failed_intervention_verified_pass_scores_both(
+        self,
+    ):
+        """Short distraction: Warning GREEN but its test FAILs, while FS and LS were
+        verified and PASS -> the verified Intervention keeps its full 0.5."""
         idx = self._DATA_ROW_IDX
         dm_colors = {
             idx: {
@@ -1331,8 +1503,7 @@ class TestComputeTransientScoreIntervention(unittest.TestCase):
         intervention_score = result.loc[
             result["Scenario"] == "Non-driving task - Owl - Intervention", "Score"
         ].values[0]
-        # FS=0.4 kept, LS=0.1 forced to 0 -> 0.4 total (not the full 0.5 sum).
-        self.assertAlmostEqual(intervention_score, 0.4)
+        self.assertAlmostEqual(intervention_score, 0.5)
 
     def test_short_distraction_warning_red_prediction_still_no_cascade(self):
         """Regression: Warning prediction RED (not green) must not trigger the new rule;
@@ -1990,6 +2161,101 @@ class TestApplyPredictionConsistency(unittest.TestCase):
         self.assertEqual(tp.cell_dict[(1, 4)]["Color"], "GREY")
 
 
+class TestGetPredictionForcedRedCoordinates(unittest.TestCase):
+    """A (Task, Movement type, Vehicle response) group may legitimately hold both
+    Red and Green predictions. The group is still suppressed in memory -- every
+    cell reads RED, so none is selected -- but the prediction sheet must give the
+    OEM back exactly what they entered. Only cells that are RED for their own
+    reason (an explicit Red, or a required cell left blank) are repainted."""
+
+    def _group(self, colors):
+        """One Warning-column group of five gaze locations with the given colors."""
+        return _FakeTP(
+            "Long distraction",
+            {
+                (row_idx, 3): {
+                    "Task": "Non-driving task",
+                    "Movement type": "Owl",
+                    "Gaze location": f"Location {row_idx}",
+                    "Vehicle response": "Warning",
+                    "Color": color,
+                }
+                for row_idx, color in enumerate(colors)
+            },
+        )
+
+    def test_group_forced_cells_are_not_repainted(self):
+        tp = self._group(["GREEN", "GREEN", "RED", "GREY", "GREEN"])
+
+        driver_monitoring.apply_prediction_consistency({"Long distraction": tp})
+        coordinates = driver_monitoring.get_prediction_forced_red_coordinates(
+            {"Long distraction": tp}
+        )
+
+        # Only the OEM's own Red cell (row_idx 2 -> Excel row 4, col_idx 3 ->
+        # Excel column D); the Green and N/A cells keep what was entered.
+        self.assertEqual(coordinates, [(4, 4)])
+
+    def test_apply_prediction_consistency_tags_only_the_flipped_cells(self):
+        tp = self._group(["GREEN", "RED"])
+
+        driver_monitoring.apply_prediction_consistency({"Long distraction": tp})
+
+        self.assertTrue(tp.cell_dict[(0, 3)]["GroupForcedRed"])
+        self.assertNotIn("GroupForcedRed", tp.cell_dict[(1, 3)])
+        # The in-memory suppression is unchanged: both cells read RED, so
+        # neither is selectable.
+        self.assertEqual(tp.cell_dict[(0, 3)]["Color"], "RED")
+        self.assertEqual(tp.cell_dict[(1, 3)]["Color"], "RED")
+
+    def test_uniform_red_group_is_repainted_in_full(self):
+        tp = self._group(["RED", "RED", "RED"])
+
+        driver_monitoring.apply_prediction_consistency({"Long distraction": tp})
+        coordinates = driver_monitoring.get_prediction_forced_red_coordinates(
+            {"Long distraction": tp}
+        )
+
+        self.assertEqual(coordinates, [(2, 4), (3, 4), (4, 4)])
+
+    def test_required_but_blank_cell_in_a_mixed_group_is_still_repainted(self):
+        """A required cell left blank has no color of its own to preserve: it must
+        reach scoring as Red rather than as a blank, even when it shares a group
+        with Green predictions.
+
+        "Long distraction" starts at worksheet row 15; its (Non-driving task, Owl)
+        group spans rows 17-21 with the Warning strategy in column D. D20 is left
+        blank, D19 is the OEM's Red, the rest are Green."""
+        pristine_path = str(files("data").joinpath("sd_template.xlsx"))
+        dm_prediction_df = common.read_excel_file_to_dfs(pristine_path)[
+            "DE - DM pred."
+        ].copy()
+        for row_idx, color in (
+            (15, "Green"),
+            (16, "Green"),
+            (17, "Red"),
+            (19, "Green"),
+        ):
+            dm_prediction_df.iloc[row_idx, 3] = color
+
+        table_processors = {
+            "Long distraction": driver_monitoring.TableProcessor(
+                dm_prediction_df,
+                "Long distraction",
+                required_mask_df=common.get_default_dm_prediction_required_mask(),
+            )
+        }
+        driver_monitoring.apply_prediction_consistency(table_processors)
+        coordinates = driver_monitoring.get_prediction_forced_red_coordinates(
+            table_processors
+        )
+
+        warning_column = sorted(
+            c for c in coordinates if c[1] == 4 and 17 <= c[0] <= 21
+        )
+        self.assertEqual(warning_column, [(19, 4), (20, 4)])
+
+
 class TestSelectInterventionTestPoints(unittest.TestCase):
     def _make_tp(self, name, entries):
         """entries: list of (task, movement_type, gaze, vehicle_response, color)."""
@@ -2475,8 +2741,8 @@ class TestPreprocessTestScenarioColumn(unittest.TestCase):
     def _rebuild_verification_df(final_df):
         """Reconstruct the real verification DataFrame the way compute_score does:
         the actual column names live as a DATA row (after the general-requirements
-        row and an empty row), not as final_df's own .columns."""
-        header_row_idx = 2
+        rows and an empty row), not as final_df's own .columns."""
+        header_row_idx = final_df.index[final_df.iloc[:, 0] == "Category"][0]
         cols = final_df.iloc[header_row_idx].tolist()
         data = final_df.values[header_row_idx + 1 :]
         return pd.DataFrame(data, columns=cols)

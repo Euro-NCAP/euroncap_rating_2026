@@ -37,5 +37,6 @@ def generate_template():
     wb = openpyxl.load_workbook(dest_path)
     common.blank_computed_columns(wb, integrity.COMPUTED_SHEET_COLUMNS)
     common.add_version_sheet_to_wb(wb, common.CliCommand.GENERATE_TEMPLATE)
+    common.add_cli_protocol_row_to_version_sheet(wb)
     wb.save(dest_path)
     print(f"Template generated at {dest_path}")

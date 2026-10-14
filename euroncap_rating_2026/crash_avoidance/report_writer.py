@@ -134,7 +134,7 @@ def adjust_column_widths(columns):
 _CPLA_CBLA_PREDICTION_SHEET = "FC - Ped & Cyc pred."
 
 
-def _derive_cpla_cbla_rows_to_delete(input_file) -> dict:
+def _derive_cpla_cbla_rows_to_delete(input_file, prediction_frame=None) -> dict:
     """Recompute which "FC - Ped & Cyc pred." worksheet rows the CPLA/CBLA
     AEB-duplicate collapse (test_info.collapse_cpla_cbla_aeb_duplicate_rows)
     would remove, straight from *input_file* -- so callers of write_report
@@ -147,6 +147,13 @@ def _derive_cpla_cbla_rows_to_delete(input_file) -> dict:
     cross-matrix row-offset bookkeeping needed: CPLA night's and CBLA's rows
     are already correct in *original* worksheet coordinates even though CPLA
     day is processed first.
+
+    *prediction_frame*, when given, is the "FC - Ped & Cyc pred." frame the
+    caller is writing (its selected-point marks are placed on its rows). The
+    grid is only collapsed when that frame is itself collapsed -- exactly the
+    derived rows shorter than the input sheet. A frame that was never
+    collapsed (prepared before the collapse rule existed) keeps the full
+    grid, so marks and grid describe the same rows.
     """
     try:
         dfs = common.read_excel_file_to_dfs(input_file)
@@ -185,6 +192,20 @@ def _derive_cpla_cbla_rows_to_delete(input_file) -> dict:
         # +2: pandas header=0 offset from 0-based df row index to 1-based
         # worksheet row (matches test_info.preprocess_stage_subelement).
         rows_to_delete.extend(matrix_start_row + row + 2 for row in removed_matrix_rows)
+
+    if rows_to_delete and prediction_frame is not None:
+        expected_rows = len(prediction_df) - len(rows_to_delete)
+        if len(prediction_frame) != expected_rows:
+            if len(prediction_frame) != len(prediction_df):
+                logger.warning(
+                    "Skipping CPLA/CBLA collapse: %s frame has %d rows, "
+                    "expected %d (uncollapsed) or %d (collapsed).",
+                    _CPLA_CBLA_PREDICTION_SHEET,
+                    len(prediction_frame),
+                    len(prediction_df),
+                    expected_rows,
+                )
+            return {}
 
     return {_CPLA_CBLA_PREDICTION_SHEET: rows_to_delete} if rows_to_delete else {}
 
@@ -314,7 +335,9 @@ def write_report(
 
     rows_to_delete = dict(rows_to_delete or {})
     if _CPLA_CBLA_PREDICTION_SHEET in sheets_to_copy:
-        for sheet_name, rows in _derive_cpla_cbla_rows_to_delete(input_file).items():
+        for sheet_name, rows in _derive_cpla_cbla_rows_to_delete(
+            input_file, updated_dfs.get(_CPLA_CBLA_PREDICTION_SHEET)
+        ).items():
             rows_to_delete.setdefault(sheet_name, []).extend(rows)
 
     for sheet_name, rows in rows_to_delete.items():

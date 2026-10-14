@@ -4,7 +4,7 @@
 # Licensed under the Apache License 2.0.
 # See http://www.apache.org/licenses/LICENSE-2.0 for details.
 
-"""Report-only DM group-consistency collector for safe_driving
+"""Report-only prediction-rule collector for safe_driving
 (consistency.find_prediction_inconsistencies) and its integration into
 integrity.find_consistency_findings."""
 
@@ -17,142 +17,49 @@ from euroncap_rating_2026 import common
 from euroncap_rating_2026.safe_driving import consistency, integrity
 
 
-class TestDmGroupConsistencyFindings(unittest.TestCase):
-    """The 'Long distraction' table starts at worksheet row 15; its first
-    group (Task=Non-driving task, Movement type=Owl) spans rows 17-21, with
-    the Warning strategy in column D and Forward support in column E."""
+class TestMixedDmPredictionGroupIsAccepted(unittest.TestCase):
+    """A (Task, Movement type, Vehicle response) group may hold both Red and
+    Green -- or Red and N/A -- cells. The upload-feedback path must stay silent
+    about it: the two rules that used to report it are gone, and nothing else
+    may take their place.
+
+    The "Long distraction" table starts at worksheet row 15; its first group
+    (Task=Non-driving task, Movement type=Owl) spans rows 17-21, with the
+    Warning strategy in column D and Forward support in column E."""
 
     def setUp(self):
-        from importlib.resources import files
-
         self.pristine_path = str(files("data").joinpath("sd_template.xlsx"))
         self.wb = openpyxl.load_workbook(self.pristine_path, data_only=True)
         self.ws = self.wb["DE - DM pred."]
 
-    def test_pristine_template_has_no_findings(self):
-        self.assertEqual(consistency.find_prediction_inconsistencies(self.wb), [])
+    def tearDown(self):
+        self.wb.close()
 
-    def test_mixed_group_reported_once_with_both_sides(self):
+    def test_green_and_red_in_one_group_reports_nothing(self):
         self.ws["D17"] = "Green"
         self.ws["D18"] = "Red"
         self.ws["D19"] = "Green"
 
-        findings = consistency.find_prediction_inconsistencies(self.wb)
-
-        self.assertEqual(len(findings), 1)
-        finding = findings[0]
-        self.assertEqual(finding.check, common.CHECK_DM_GROUP_CONSISTENCY)
-        self.assertEqual(finding.sheet, "DE - DM pred.")
-        self.assertEqual(finding.cell, "D17")
-        self.assertIn("D17", finding.description)
-        self.assertIn("D18", finding.description)
-        self.assertIn("mixed predictions are not accepted", finding.description)
-        self.assertEqual(finding.row_identity.get("Task"), "Non-driving task")
-        self.assertEqual(finding.row_identity.get("Movement type"), "Owl")
-
-    def test_uniform_and_blank_mixes_are_not_reported(self):
-        # All-red group: consistent, nothing to report.
-        for row in range(17, 22):
-            self.ws[f"D{row}"] = "Red"
-        # Green + blank group: the blank is a missing input, not a
-        # contradiction.
-        self.ws["F17"] = "Green"
-
         self.assertEqual(consistency.find_prediction_inconsistencies(self.wb), [])
 
-    def test_scope_filtering(self):
-        self.ws["D17"] = "Green"
-        self.ws["D18"] = "Red"
-
-        dm = consistency.find_prediction_inconsistencies(
-            self.wb, "Driver Engagement", "Driver monitoring"
-        )
-        other = consistency.find_prediction_inconsistencies(
-            self.wb, "Vehicle Assistance", "Speed assistance"
-        )
-
-        self.assertEqual(len(dm), 1)
-        self.assertEqual(other, [])
-
-
-class TestDmNaForcedRedFindings(unittest.TestCase):
-    """The 'Long distraction' table starts at worksheet row 15; its first
-    group (Task=Non-driving task, Movement type=Owl) spans rows 17-21, with
-    the Warning strategy in column D and Forward support in column E."""
-
-    def setUp(self):
-        from importlib.resources import files
-
-        self.pristine_path = str(files("data").joinpath("sd_template.xlsx"))
-        self.wb = openpyxl.load_workbook(self.pristine_path, data_only=True)
-        self.ws = self.wb["DE - DM pred."]
-
-    def test_red_and_na_reported(self):
-        # Red + N/A group: apply_prediction_consistency will silently force
-        # E18 to Red too -- this is exactly what the finding should surface.
+    def test_na_and_red_in_one_group_reports_nothing(self):
         self.ws["E17"] = "Red"
         self.ws["E18"] = "N/A"
 
-        findings = consistency.find_prediction_inconsistencies(self.wb)
-
-        self.assertEqual(len(findings), 1)
-        finding = findings[0]
-        self.assertEqual(finding.check, common.CHECK_DM_NA_FORCED_RED)
-        self.assertEqual(finding.sheet, "DE - DM pred.")
-        self.assertEqual(finding.cell, "E18")
-        self.assertIn("E17", finding.description)
-        self.assertIn("E18", finding.description)
-        self.assertIn("Red", finding.description)
-        self.assertEqual(finding.row_identity.get("Task"), "Non-driving task")
-        self.assertEqual(finding.row_identity.get("Movement type"), "Owl")
-
-    def test_na_without_red_is_not_reported(self):
-        # N/A alongside Green only, no Red in the group -- nothing forces
-        # this N/A cell to anything.
-        self.ws["E17"] = "Green"
-        self.ws["E18"] = "N/A"
-
         self.assertEqual(consistency.find_prediction_inconsistencies(self.wb), [])
 
-    def test_red_green_and_na_reports_both_checks(self):
-        # All three colors in one group: both the green/red contradiction
-        # and the na-forced-red consequence are real and independent.
-        self.ws["E17"] = "Green"
-        self.ws["E18"] = "Red"
-        self.ws["E19"] = "N/A"
-
-        findings = consistency.find_prediction_inconsistencies(self.wb)
-
-        self.assertEqual(
-            {f.check for f in findings},
-            {common.CHECK_DM_GROUP_CONSISTENCY, common.CHECK_DM_NA_FORCED_RED},
-        )
-
-    def test_scope_filtering(self):
-        self.ws["D17"] = "Red"
-        self.ws["D18"] = "N/A"
-
-        dm = consistency.find_prediction_inconsistencies(
-            self.wb, "Driver Engagement", "Driver monitoring"
-        )
-        other = consistency.find_prediction_inconsistencies(
-            self.wb, "Vehicle Assistance", "Speed assistance"
-        )
-
-        self.assertEqual(len(dm), 1)
-        self.assertEqual(other, [])
-
-    def test_find_consistency_findings_merges_missing_and_rules(self):
+    def test_find_consistency_findings_reports_no_prediction_rule(self):
+        """Through the whole upload-feedback entry point: a mixed group leaves
+        only the ordinary missing-input findings for the blank cells."""
         self.ws["D17"] = "Green"
         self.ws["D18"] = "Red"
+        self.ws["D19"] = "N/A"
 
         findings = integrity.find_consistency_findings(
             self.wb, "Driver Engagement", "Driver monitoring"
         )
 
-        checks = {f.check for f in findings}
-        self.assertIn(common.CHECK_DM_GROUP_CONSISTENCY, checks)
-        self.assertIn(common.CHECK_MISSING_INPUT, checks)
+        self.assertEqual({f.check for f in findings}, {common.CHECK_MISSING_INPUT})
 
 
 class TestSlifEmptyScopeFindingCount(unittest.TestCase):
@@ -252,6 +159,19 @@ class TestStaleAccCutOutFindings(unittest.TestCase):
         self.assertEqual(
             len(self._cut_out_findings("Vehicle Assistance", "ACC performance")), 1
         )
+
+    def test_find_consistency_findings_merges_missing_and_rules(self):
+        """find_consistency_findings returns one list covering both the
+        missing-input check and the prediction rules."""
+        self.ws.cell(row=52, column=2).value = "0 km/h"
+
+        findings = integrity.find_consistency_findings(
+            self.wb, "Vehicle Assistance", "ACC performance"
+        )
+
+        checks = {f.check for f in findings}
+        self.assertIn(common.CHECK_STALE_ACC_CUT_OUT, checks)
+        self.assertIn(common.CHECK_MISSING_INPUT, checks)
 
 
 if __name__ == "__main__":

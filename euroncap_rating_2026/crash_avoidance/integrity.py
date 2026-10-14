@@ -27,7 +27,8 @@ follow-up if this mechanism is generalized further:
     rebuild_trusted_df's single-flat-header assumption.
   - "FC - Driver State Link" is copied through verbatim by rebuild_trusted_*
     (no protected reference data), but its dropdown grid is OEM input and is
-    covered by find_missing_required_inputs via GRID_SHEET_STAGE_ELEMENTS.
+    covered by find_missing_required_inputs via
+    DRIVER_STATE_LINK_STAGE_ELEMENTS (row-scoped by scenario label).
   - "Documentation"/"Data" hold "is supporting evidence required" flags that
     are computed once in preprocess.py (see documentation_data.py) from
     already-trust-boundary-protected sheets, then simply carried through
@@ -124,11 +125,6 @@ PRISTINE_TEMPLATE_NAME = "ca_template.xlsx"
 # scoped to the protocol element(s) it belongs to; "LDC - robust. pred." is
 # the one sheet shared across two Lane Departure Collisions subelements.
 GRID_SHEET_STAGE_ELEMENTS = {
-    # FC-prefixed, but the "Driver state link" loadcase belongs to Lane
-    # Departure Collisions / Single vehicle in data_model.py -- the grid
-    # declares, per FC scenario, which sensitivity ranges the driver-state
-    # link applies to, and the OEM must fill all of it at prediction time.
-    "FC - Driver State Link": [("Lane Departure Collisions", "Single vehicle")],
     "FC - Car & PTW pred.": [("Frontal Collisions", "Car & PTW")],
     "FC - Car & PTW robust. pred.": [("Frontal Collisions", "Car & PTW")],
     "FC - Ped & Cyc pred.": [("Frontal Collisions", "Pedestrian & cyclist")],
@@ -142,6 +138,60 @@ GRID_SHEET_STAGE_ELEMENTS = {
     "LSC - Car & PTW pred.": [("Low Speed Collisions", "Car & PTW")],
     "LSC - Ped & Cyc pred.": [("Low Speed Collisions", "Pedestrian & cyclist")],
 }
+
+# The "FC - Driver State Link" grid is the Frontal Collisions v1.2 sec 2.4.1 /
+# 5.4 per-scenario claim: for each FC scenario, which sensitivity ranges the
+# driver-state link applies to. It belongs to the two Frontal Collisions
+# elements, split row by row on the scenario label in column A (CCRs..CMCscp
+# -> Car & PTW, CPLA..CBFA -> Pedestrian & cyclist), so an element's upload is
+# only asked for its own rows. It is NOT the Lane Departure Collisions
+# "Driver state link" loadcase in data_model.py: that is the separate 3-point
+# PASS/FAIL item (LDC v1.2 sec 3.1) scored from the verification sheet, and
+# nothing reads this grid for it. Values map scope literals to
+# data_model.STAGE_SUBELEMENT_TO_LOADCASES["FC"] keys.
+DRIVER_STATE_LINK_SHEET = "FC - Driver State Link"
+DRIVER_STATE_LINK_STAGE_ELEMENTS = {
+    ("Frontal Collisions", "Car & PTW"): "Car & PTW",
+    ("Frontal Collisions", "Pedestrian & cyclist"): "Ped & Cyc",
+}
+
+
+def _driver_state_link_rows(pristine_ws) -> dict:
+    """Partition the pristine "FC - Driver State Link" rows by protocol
+    element: {(stage_element, stage_subelement): set_of_row_numbers}. Each
+    row is claimed by the FC subelement whose loadcases
+    (data_model.STAGE_SUBELEMENT_TO_LOADCASES, subtests folded to their
+    test via SUBTEST_TO_TEST_DICT) contain the row's column-A scenario
+    label; anchored on the labels, not row numbers, so a template layout
+    change never needs a code update. Raises TemplateIntegrityError for a
+    label no FC element claims -- a silently unowned row would make its
+    cells optional for everyone.
+    """
+    scenarios_by_scope = {
+        scope: {
+            data_model.SUBTEST_TO_TEST_DICT.get(loadcase, loadcase)
+            for loadcase in data_model.STAGE_SUBELEMENT_TO_LOADCASES["FC"][key]
+        }
+        for scope, key in DRIVER_STATE_LINK_STAGE_ELEMENTS.items()
+    }
+    rows = {scope: set() for scope in DRIVER_STATE_LINK_STAGE_ELEMENTS}
+    max_row, _ = common.get_populated_sheet_bounds(pristine_ws)
+    for row in range(2, max_row + 1):
+        label = pristine_ws.cell(row=row, column=1).value
+        if common.is_empty_cell(label):
+            continue
+        owners = [
+            scope
+            for scope, scenarios in scenarios_by_scope.items()
+            if str(label).strip() in scenarios
+        ]
+        if not owners:
+            raise common.TemplateIntegrityError(
+                f"Sheet '{pristine_ws.title}' row {row}: scenario '{label}' "
+                "belongs to no Frontal Collisions element."
+            )
+        rows[owners[0]].add(row)
+    return rows
 
 
 def rebuild_trusted_input(user_file_path: str) -> str:
@@ -273,6 +323,22 @@ def find_missing_required_inputs(
                     wb[sheet_name], pristine_wb[sheet_name], sheet_name
                 )
             )
+
+        if DRIVER_STATE_LINK_SHEET in wb.sheetnames:
+            pristine_ws = pristine_wb[DRIVER_STATE_LINK_SHEET]
+            for scope, rows in _driver_state_link_rows(pristine_ws).items():
+                if not common.stage_elements_in_scope(
+                    [scope], stage_element, stage_subelement
+                ):
+                    continue
+                missing.extend(
+                    common.find_missing_grid_inputs(
+                        wb[DRIVER_STATE_LINK_SHEET],
+                        pristine_ws,
+                        DRIVER_STATE_LINK_SHEET,
+                        rows=rows,
+                    )
+                )
         return missing
     except common.TemplateIntegrityError:
         if version_mismatch:

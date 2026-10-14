@@ -763,14 +763,15 @@ def _resolve_legform_blue_values(legform_loadcases):
     # Second pass: resolve missing values. The outcome must not depend on
     # sheet order:
     #
-    # - An ST point copies its symmetric partner. That partner is guaranteed
-    #   to be a T or an ST — collect_legform_symmetry_violations (enforced via
-    #   check_legform_blue_symmetry) rejects matrices where the mirror of a
-    #   T/ST is anything else — so an ST never inherits from an inferred SA.
-    #   Nor can it inherit from another *inferred* ST: such a chain would have
-    #   to be circular (the partner's own mirror is this blank point), so the
-    #   partner's value can only be measured, and every resolvable ST settles
-    #   in one sweep from the measured values alone.
+    # - An ST point copies its symmetric partner's *measured* value. Only
+    #   measured values are in value_map at this stage (SA inference runs
+    #   afterwards), so an ST never inherits an inferred SA value, and it
+    #   cannot inherit from another *inferred* ST either: such a chain would
+    #   have to be circular (the partner's own mirror is this blank point).
+    #   Every resolvable ST therefore settles in one sweep from the measured
+    #   values alone. Asymmetric patterns are accepted (Euro NCAP allows
+    #   them), so the mirror may be grey or an SA with no value: the ST then
+    #   stays unresolved and is warned about below.
     # - An SA point takes the max of its adjacent columns, and a neighbour may
     #   settle later with a *larger* value than whatever was available when
     #   the SA was first visited. Finalizing an SA on its first available
@@ -1801,157 +1802,19 @@ def compute_all_vru_test_points(vru_prediction_df):
     return vru_test_points_all
 
 
-@dataclass
-class LegformSymmetryViolation:
-    """One legform T/ST/SA symmetry violation, in enough detail for either
-    caller to build its own message: check_legform_blue_symmetry's blocking
-    ValueError (matrix-index wording, unchanged) and
-    consistency.find_prediction_inconsistencies' report-only finding
-    (worksheet-cell wording). ``sym_color`` is None for "sa_out_of_range",
-    the one rule with no symmetric cell to name."""
+def _draw_row_parity(row_label=""):
+    """Draw the start point for one legform row (VRU Impact v1.2 §3.4.3.3 / §3.4.4.3).
 
-    row_idx: int
-    j: int
-    col: int
-    j_sym: int
-    sym_color: "VruPredictionColor | None"
-    rule: str  # "t_st" | "sa_mismatch" | "sa_out_of_range"
-
-
-def _legform_violation_message(v: "LegformSymmetryViolation") -> str:
-    """check_legform_blue_symmetry's exact historical wording, rebuilt from
-    a LegformSymmetryViolation -- kept separate from the violation
-    collection itself so the report-only collector can word its own
-    message differently without touching this one."""
-    if v.rule == "t_st":
-        return (
-            f"Asymmetric T/ST prediction at legform matrix row={v.row_idx}, "
-            f"col={v.col} (matrix index j={v.j}): symmetric cell (col={-v.col}, "
-            f"j={v.j_sym}) has color '{v.sym_color.value}', expected T or ST."
-        )
-    if v.rule == "sa_out_of_range":
-        return (
-            f"SA prediction at legform matrix row={v.row_idx}, col={v.col} "
-            f"(matrix index j={v.j}): symmetric column index {v.j_sym} is out of range."
-        )
-    return (
-        f"SA prediction at legform matrix row={v.row_idx}, col={v.col} "
-        f"(matrix index j={v.j}): symmetric cell (col={-v.col}, j={v.j_sym}) "
-        f"has color '{v.sym_color.value}', expected SA."
-    )
-
-
-def collect_legform_symmetry_violations(matrix) -> list:
-    """The structured form of check_legform_blue_symmetry's rule: every
-    T/ST or SA cell whose required symmetric partner is wrong -- all of
-    them, not just the first. Returns a list of LegformSymmetryViolation in
-    matrix order. Shared by the blocking preprocess check below and the
-    report-only collector (consistency.find_prediction_inconsistencies),
-    each of which words its own message from the structured fields."""
-    num_cols = len(matrix[0])
-    col_center = num_cols // 2
-
-    blue_t_st = {VruPredictionColor.BLUE_T, VruPredictionColor.BLUE_ST}
-
-    violations = []
-    for row_idx, row in enumerate(matrix):
-        for j, color in enumerate(row):
-            if color == VruPredictionColor.GREY:
-                continue
-            col = col_center - j
-            j_sym = num_cols - 1 - j
-            if color in blue_t_st:
-                sym_color = row[j_sym]
-                if sym_color not in blue_t_st:
-                    violations.append(
-                        LegformSymmetryViolation(
-                            row_idx, j, col, j_sym, sym_color, "t_st"
-                        )
-                    )
-
-            elif color == VruPredictionColor.BLUE_SA:
-                if j_sym < 0 or j_sym >= num_cols:
-                    violations.append(
-                        LegformSymmetryViolation(
-                            row_idx, j, col, j_sym, None, "sa_out_of_range"
-                        )
-                    )
-                    continue
-                sym_color = row[j_sym]
-                if sym_color != VruPredictionColor.BLUE_SA:
-                    violations.append(
-                        LegformSymmetryViolation(
-                            row_idx, j, col, j_sym, sym_color, "sa_mismatch"
-                        )
-                    )
-    return violations
-
-
-def check_legform_blue_symmetry(matrix):
-    """Validate that every T/ST and SA cell has the required symmetric partner.
-
-    For a legform matrix with N columns the centre column index is N//2, and the
-    signed col coordinate is ``col = N//2 - j``.  The symmetric of column ``j`` is
-    ``j_sym = N - 1 - j``.
-
-    Rules:
-    - Every T/ST cell at (row, col) must have its symmetric cell at (row, -col) also in {T, ST}.
-    - Every SA cell at (row, col) with col != 0 must have its symmetric cell be SA.
-    - Every SA cell at (row, col) must have its symmetric cell be SA (for col == 0 the symmetric is itself).
-    Raises:
-        ValueError: with a descriptive message identifying the offending cell.
+    0 -> L0 / U0: the even signed columns (0, ±2, ±4, ±6, ...)
+    1 -> L1 / U1: the odd  signed columns (±1, ±3, ±5, ±7, ...)
     """
-    violations = collect_legform_symmetry_violations(matrix)
-    if violations:
-        raise ValueError(_legform_violation_message(violations[0]))
-
-
-def _resolve_row_coin(valid_cols, row):
-    """Decide whether an all-blue legform row needs a coin flip, and which parity to use.
-
-    An SA cell is "orphaned" when neither of its neighbors within valid_cols is a
-    T/ST -- _resolve_legform_blue_values needs at least one adjacent tested column
-    to infer an SA's value, so only orphaned SA cells actually require a promotion.
-
-    Returns (coin, needs_flip). needs_flip=False means every SA in valid_cols already
-    has an adjacent tested (T/ST) neighbor -- the row must be emitted exactly as
-    declared, with no coin flip and no promotion. needs_flip=True means at least one
-    SA is orphaned; coin is inferred (unanimous/majority) from any T/ST-SA-T/ST
-    triples in the row, falling back to a genuine random.randint(0, 1) only when
-    there are no such triples or their votes are tied.
-    """
-    t_st = {VruPredictionColor.BLUE_T, VruPredictionColor.BLUE_ST}
-    colors = [row[c] for c in valid_cols]
-
-    def has_tested_neighbor(i):
-        left = i > 0 and colors[i - 1] in t_st
-        right = i < len(colors) - 1 and colors[i + 1] in t_st
-        return left or right
-
-    orphaned = any(
-        colors[i] == VruPredictionColor.BLUE_SA and not has_tested_neighbor(i)
-        for i in range(len(colors))
+    coin = random.randint(0, 1)
+    logger.info(
+        "%s start-point draw: %s",
+        row_label,
+        "L0/U0 (even)" if coin == 0 else "L1/U1 (odd)",
     )
-    if not orphaned:
-        return None, False
-
-    votes = [
-        (i - 1) % 2
-        for i in range(1, len(colors) - 1)
-        if colors[i] == VruPredictionColor.BLUE_SA
-        and colors[i - 1] in t_st
-        and colors[i + 1] in t_st
-    ]
-    zeros, ones = votes.count(0), votes.count(1)
-    if zeros == ones:
-        coin = random.randint(0, 1)
-        logger.info(f"Coin flip result: {coin}")
-    else:
-        coin = 0 if zeros > ones else 1
-        logger.info(
-            f"Coin inferred from symmetry votes (0s={zeros}, 1s={ones}): {coin}"
-        )
-    return coin, True
+    return coin
 
 
 def select_blue_pattern(row_idx, matrix, num_verification_tests_leg=None):
@@ -1988,30 +1851,37 @@ def select_blue_pattern(row_idx, matrix, num_verification_tests_leg=None):
             for col in range(start_blue, end_blue + 1)
             if row[col] != VruPredictionColor.GREY
         ]
-        coin, needs_flip = _resolve_row_coin(valid_cols, row)
-        if needs_flip:
-            selected_cols = [
-                col for idx, col in enumerate(valid_cols) if (idx % 2 == coin)
-            ]
-            # SA→ST promotion: for each selected column, if the cell (and row=2 if applicable) is SA, promote to ST
-            for col in selected_cols:
-                if matrix[row_idx][col] == VruPredictionColor.BLUE_SA:
-                    matrix[row_idx][col] = VruPredictionColor.BLUE_ST
-                    logger.debug(
-                        f"SA→ST promotion at legform matrix row={row_idx}, col_j={col} (coin={coin})"
-                    )
-                # Row 2 (Knee/Tibia) always mirrors row 1 (Femur) selections; promote there too
-                if (
-                    row_idx == 1
-                    and len(matrix) > 2
-                    and matrix[2][col] == VruPredictionColor.BLUE_SA
-                ):
-                    matrix[2][col] = VruPredictionColor.BLUE_ST
-                    logger.debug(
-                        f"SA→ST promotion at legform matrix row=2 (Tibia/Knee), col_j={col} (coin={coin})"
-                    )
-        # Every blue cell in the row's span is always returned -- the coin only ever
-        # decides *which* orphaned SA cells get promoted, never which cells survive.
+        # Unconditional start-point draw (VRU Impact v1.2 §3.4.3.3 / §3.4.4.3):
+        # L0/U0 tests the even signed columns, L1/U1 the odd ones. Parity is
+        # measured on the signed column (centre - j), so L0/L1 name the same
+        # set on every vehicle regardless of where the blue span starts.
+        centre = len(row) // 2  # signed col = centre - j
+        coin = _draw_row_parity(f"legform row {row_idx}")
+        # Only the columns this row actually tests. A column that is grey here
+        # is not an impact, so neither the row itself nor the Knee & Tibia row
+        # below it may be promoted there: the promoted cell would leave the SA
+        # fallback (which only picks up cells still marked SA) and never reach
+        # the verification sheet.
+        for j in valid_cols:
+            if (centre - j) % 2 != coin:
+                continue
+            if matrix[row_idx][j] == VruPredictionColor.BLUE_SA:
+                matrix[row_idx][j] = VruPredictionColor.BLUE_ST
+                logger.debug(
+                    f"SA→ST promotion at legform matrix row={row_idx}, col_j={j} (coin={coin})"
+                )
+            # Femur and Knee & Tibia are one impact: same draw, own SA check
+            if (
+                row_idx == 1
+                and len(matrix) > 2
+                and matrix[2][j] == VruPredictionColor.BLUE_SA
+            ):
+                matrix[2][j] = VruPredictionColor.BLUE_ST
+                logger.debug(
+                    f"SA→ST promotion at legform matrix row=2 (Tibia/Knee), col_j={j} (coin={coin})"
+                )
+        # Every blue cell in the row's span is always returned -- the draw only
+        # decides which SA cells get promoted to ST, never which cells survive.
         return [(row_idx, col, matrix[row_idx][col]) for col in valid_cols]
     else:
         # Prepare filtered colors for the row (excluding grey/blue/green-40/green-30/green-20/d red)
@@ -2139,7 +2009,6 @@ def process_legform_test(vru_prediction_df, vru_params, input_selected_points=No
 
     if input_selected_points is not None:
         legform_matrix = get_legform_matrix(vru_prediction_df)
-        check_legform_blue_symmetry(legform_matrix)
 
         matched_points = select_vru_points_from_input(
             extract_legform_candidate_points(vru_prediction_df),
@@ -2153,12 +2022,15 @@ def process_legform_test(vru_prediction_df, vru_params, input_selected_points=No
         ]
 
         # Row-2 mirror: for each row-1 selection add the corresponding row-2 cell,
-        # but only when that cell is not GREY (i.e., it represents a real test point).
+        # but only when that cell is not GREY (i.e., it represents a real test point)
+        # and was not already selected explicitly as a Knee & Tibia point.
+        selected_cells = {(r, c) for r, c, _ in selected_row_col_pairs}
         for row, col, _ in list(selected_row_col_pairs):
-            if row == 1 and len(legform_matrix) > 2:
+            if row == 1 and len(legform_matrix) > 2 and (2, col) not in selected_cells:
                 color_at_row2 = legform_matrix[2][col]
                 if color_at_row2 != VruPredictionColor.GREY:
                     selected_row_col_pairs.append((2, col, color_at_row2))
+                    selected_cells.add((2, col))
 
         # Unselected SA cells always get a row in the verification sheet (no fillable KPI).
         # This branch never calls select_blue_pattern (manually supplied points are forced
@@ -2197,7 +2069,6 @@ def process_legform_test(vru_prediction_df, vru_params, input_selected_points=No
     )
 
     legform_matrix = get_legform_matrix(vru_prediction_df)
-    check_legform_blue_symmetry(legform_matrix)
 
     selected_row_pelvis = select_blue_pattern(
         0,

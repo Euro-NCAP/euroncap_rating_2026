@@ -48,5 +48,46 @@ class TestLoadCase(unittest.TestCase):
         self.assertEqual(load_case.seats[0].name, "Driver")
 
 
+class TestLoadCaseAresCappingGate(unittest.TestCase):
+    """The load case name reaches the dummy, so the side pole head `Ares`
+    capping gate only fires on the pole load case."""
+
+    @staticmethod
+    def _make_df(load_case_name):
+        return pd.DataFrame(
+            {
+                "Loadcase": [load_case_name, None, None, None],
+                "Seat position": ["Driver", None, None, None],
+                "Dummy": ["WorldSID-50", None, None, None],
+                "Body region": ["Head", None, None, None],
+                "Criteria": [
+                    "Ares",
+                    "HIC15",
+                    "Ares-3ms",
+                    "Direct contact with pole",
+                ],
+                "HPL": [None, 500.0, 72.0, None],
+                "LPL": [None, 700.0, 80.0, None],
+                "Capping": [80.0, 700.0, 80.0, None],
+                "Value": [81.91, 376.86, 70.51, False],
+            }
+        )
+
+    @staticmethod
+    def _capping(load_case):
+        dummy = load_case.seats[0].dummy
+        if not dummy.get_capping():
+            dummy.compute_capping()
+        return dummy.get_capping()
+
+    def test_pole_low_hic15_does_not_cap(self):
+        load_case, _ = LoadCase.get_loadcase_from_row(0, self._make_df("Pole-32"))
+        self.assertFalse(self._capping(load_case))
+
+    def test_aemdb_low_hic15_still_caps(self):
+        load_case, _ = LoadCase.get_loadcase_from_row(0, self._make_df("AEMDB-60"))
+        self.assertTrue(self._capping(load_case))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -25,18 +25,25 @@ settings = config.Settings()
 def generate_template():
     """
     Generate a template file for safe driving.
-    This function copies the `sd_template.xlsx` file from the predefined
-    data directory to the current working directory. The template file
-    serves as a starting point for safe driving analysis.
+    This function copies the master template registered for the running
+    command line's protocol (`sd_template.xlsx` for `euroncap_rating_2026`;
+    see integrity.pristine_template_path) to the current working directory.
+    The template file serves as a starting point for safe driving analysis.
     Outputs:
-        - A file named `sd_template.xlsx` in the current working directory.
+        - A file named after the master template in the current working
+          directory.
     """
-    template_path = str(files("data").joinpath("sd_template.xlsx"))
+    protocol = common.normalize_protocol(common.get_cli_protocol())
+    template_path = integrity.pristine_template_path(protocol)
+    template_name = os.path.basename(template_path)
     print(f"[Safe Driving] Generating template for safe driving...")
-    dest_path = os.path.join(os.getcwd(), "sd_template.xlsx")
+    dest_path = os.path.join(os.getcwd(), template_name)
     shutil.copyfile(template_path, dest_path)
     wb = openpyxl.load_workbook(dest_path)
     common.blank_computed_columns(wb, integrity.COMPUTED_SHEET_COLUMNS)
     common.add_version_sheet_to_wb(wb, common.CliCommand.GENERATE_TEMPLATE)
+    # A registered master may already carry the marker; stamping it again
+    # is a no-op, and keeps the five domains' generate-template alike.
+    common.add_cli_protocol_row_to_version_sheet(wb)
     wb.save(dest_path)
     print(f"Template generated at {dest_path}")

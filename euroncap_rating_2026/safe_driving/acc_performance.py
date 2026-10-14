@@ -28,6 +28,9 @@ GREEN_V_REDUCTION_OFFSET = 2.0
 ORANGE_V_REDUCTION_THRESHOLD = 15.0
 
 CUT_OUT_SCENARIOS = {"CCR cut-out", "CMR cut-out"}
+# The target brakes to a standstill and the VUT follows it, so the speed to
+# shed is the VUT's own: v_VUT - 2.
+BRAKING_SCENARIOS = {"CCRb", "CMRb"}
 
 
 def get_green_v_reduction_threshold(
@@ -47,6 +50,14 @@ def get_green_v_reduction_threshold(
     roughly the SOV's 70 km/h, so a v_VUT - 2 criterion would demand an
     88 km/h reduction from a vehicle travelling 70 and make that test point
     unwinnable.
+
+    Braking (CCRb / CMRb) is measured against the VUT's own speed: the VUT
+    follows the target with ACC engaged and the target brakes to a standstill,
+    so the "Target speed" cell (50 km/h) is the target's *initial* speed, not
+    its speed at Tend. "Fully avoids" therefore means the VUT is at a
+    standstill within the 2 km/h tolerance: v_VUT - 2, i.e. 53 km/h on both
+    template rows -- not v_VUT - v_target - 2 = 3 km/h, which every run would
+    clear.
 
     Every other scenario keeps the speed-dependent v_VUT - v_target - 2
     criterion. Cut-*in* is deliberately not included: there the target really
@@ -74,6 +85,12 @@ def get_green_v_reduction_threshold(
                 f"column ({v_sov} km/h)."
             )
         return float(v_sov - GREEN_V_REDUCTION_OFFSET)
+
+    if scenario in BRAKING_SCENARIOS:
+        # The target brakes to a standstill and the VUT follows it, so the
+        # speed to shed is the VUT's own: the "Target speed" cell (50 km/h) is
+        # the target's initial speed, not its speed at Tend.
+        return float(v_scenario - GREEN_V_REDUCTION_OFFSET)
 
     return float(v_scenario - v_target - GREEN_V_REDUCTION_OFFSET)
 
@@ -408,6 +425,43 @@ def preprocess(
     return selected_test_points, verification_df, scenario_scores_df
 
 
+def _bind_matrix_header_columns(verification_df: pd.DataFrame) -> list:
+    """Column names for "VA - ACC verif." with the matrix fields bound.
+
+    The sheet on disk is the *report* layout build_verification_report_df
+    writes: the Road features/Auto-resume block under a 3-name top header,
+    a spacer, then the matrix block carrying its own header row inside the
+    sheet. Read back with a single header row, the matrix columns arrive as
+    'Unnamed: N', so the by-name lookups in compute_score (OEM Prediction,
+    VUT speed, Target speed) would miss and every point would score Red/0.
+    Rebind each unnamed/blank column to the interior header cell at the same
+    position. The flat self-describing form (preprocess output in memory, the
+    evaluator's rebuilt frame) already names the fields and is left as-is.
+    """
+    columns = list(verification_df.columns)
+    if "OEM Prediction" in columns:
+        return columns
+
+    for _, row in verification_df.iterrows():
+        header = [
+            "" if pd.isna(value) else str(value).strip() for value in row.tolist()
+        ]
+        if "OEM Prediction" in header:
+            break
+    else:
+        return columns
+
+    return [
+        (
+            header[pos]
+            if header[pos]
+            and (str(col).strip() == "" or str(col).startswith("Unnamed"))
+            else col
+        )
+        for pos, col in enumerate(columns)
+    ]
+
+
 def compute_score(dfs: dict[str, pd.DataFrame]) -> Dict:
     acc_score_dict = {}
     matrix_test_keys = [
@@ -503,6 +557,12 @@ def compute_score(dfs: dict[str, pd.DataFrame]) -> Dict:
         )
         return pd.DataFrame(), acc_score_dict
 
+    # Bind the matrix fields for the report layout read back from disk; the
+    # original names are restored before returning so the written report
+    # keeps its layout (blank top header over the matrix columns).
+    original_columns = list(acc_verification_df.columns)
+    acc_verification_df.columns = _bind_matrix_header_columns(acc_verification_df)
+
     acc_verification_df["Score"] = 0.0
     acc_verification_df["Color"] = ""
 
@@ -553,6 +613,19 @@ def compute_score(dfs: dict[str, pd.DataFrame]) -> Dict:
             # a real accumulator now that there's something to sum.
             if pd.isna(acc_score_dict[scenario]):
                 acc_score_dict[scenario] = 0.0
+
+            # A matrix row without a readable OEM Prediction means the sheet
+            # is in a layout we failed to bind -- fail loudly instead of
+            # letting the Grey default score the whole element 0.
+            if "OEM Prediction" not in row.index:
+                message = (
+                    "VA - ACC verif.: no 'OEM Prediction' column for matrix "
+                    f"row {index} (scenario '{scenario}', test point "
+                    f"'{row.get('Test point', '')}'); the matrix columns could "
+                    "not be read, the sheet is not in a recognised layout."
+                )
+                logger.error(message)
+                raise ValueError(message)
 
             current_color = str(
                 row.get(
@@ -626,7 +699,8 @@ def compute_score(dfs: dict[str, pd.DataFrame]) -> Dict:
             # Scoring based on v_reduction criteria. The green-result
             # threshold depends on the scenario group:
             # - Car-to-VRU - Longitudinal (CPLA/CBLA): fixed 30 km/h
-            # - Car (CCR*) / PTW (CMR*): v_scenario - v_target - 2
+            # - Car (CCR*) / PTW (CMR*): v_scenario - v_target - 2, except
+            #   cut-out (v_SOV - 2) and braking CCRb/CMRb (v_scenario - 2)
             # GREEN: v_reduction > green_threshold => full score
             #        v_reduction > 15 => half score
             #        else => 0
@@ -723,6 +797,9 @@ def compute_score(dfs: dict[str, pd.DataFrame]) -> Dict:
             acc_score_dict["Auto-resume"] = 0.0
         acc_score_dict["Auto-resume"] += auto_resume_score
 
+    acc_verification_df.columns = original_columns + list(
+        acc_verification_df.columns[len(original_columns) :]
+    )
     acc_verification_col_names = [
         col if "Unnamed" not in str(col) else ""
         for col in acc_verification_df.columns.tolist()

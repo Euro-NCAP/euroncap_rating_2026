@@ -163,35 +163,176 @@ def _backset_hpl_lpl(torso_angle_value):
     return 7.128 * torso_angle_value + 153.0
 
 
-def get_rear_whiplash_df_with_torso_angle(dfs, strict=True):
-    """Return an updated CP - Rear Whiplash DataFrame with HPL/LPL set from torso angle.
+# Rear Impact v1.3: the Static-Rear seat row is "Rear (second row)" (the
+# previous revision spelled it "Rear") and a "Rear (third row)" block with
+# its own torso angle was added. Each seat row's backset limit comes from
+# that row's own angle.
+REAR_SEAT_SECOND_ROW = "Rear (second row)"
+REAR_SEAT_THIRD_ROW = "Rear (third row)"
+_SECOND_ROW_SEAT_NAMES = (REAR_SEAT_SECOND_ROW, "Rear")
+_SECOND_ROW_TORSO_ANGLE_NAMES = ("Torso angle (rear second row)", "Torso angle (rear)")
+TORSO_ANGLE_THIRD_ROW = "Torso angle (rear third row)"
+_BACKSET_CRITERIA = ["Backset - Lowest", "Backset - Mid"]
 
-    When strict is True, a missing 'Torso angle (rear)' input raises a ValueError
-    (mandatory for score computation). When strict is False, it only logs a warning
-    and returns None, leaving the sheet unchanged (e.g. during preprocessing of a
-    not fully filled template).
+
+def _rear_whiplash_param(param_df, names):
+    """The Value of the first 'CP - Rear Whiplash' input parameter whose
+    name is in *names* (current spelling first, then legacy), or None."""
+    rows = param_df[param_df["param_code"].str.contains("CP - Rear Whiplash", na=False)]
+    for name in names:
+        match = rows[rows["Input parameter"] == name]
+        if not match.empty:
+            return match.iloc[0]["Value"]
+    return None
+
+
+def _as_angle(value):
+    """A torso angle as float, or None when the cell is blank, N/A or not a
+    finite number (a third-row 'N/A' means the vehicle has no third row; an
+    infinite angle would make every backset pass)."""
+    if value is None or common.is_not_applicable(value) or common.is_empty_cell(value):
+        return None
+    try:
+        angle = float(value)
+    except (TypeError, ValueError):
+        return None
+    return angle if np.isfinite(angle) else None
+
+
+def third_row_present(dfs) -> bool:
+    """True when the 'Torso angle (rear third row)' input parameter is a
+    number: the vehicle has a third seat row, which activates the
+    'Rear (third row)' block and halves each rear row's share of the point.
+    'N/A', blank, and a file predating the parameter all mean no third row."""
+    if dfs.get("Input parameters") is None:
+        return False
+    param_df = common.get_param_df(dfs)
+    return (
+        _as_angle(_rear_whiplash_param(param_df, (TORSO_ANGLE_THIRD_ROW,))) is not None
+    )
+
+
+def get_rear_whiplash_df_with_torso_angle(dfs, strict=True):
+    """Return an updated CP - Rear Whiplash DataFrame with each Static-Rear
+    seat row's Backset HPL/LPL set from that row's own torso angle.
+
+    The second row reads 'Torso angle (rear second row)' (or the legacy
+    'Torso angle (rear)'); the third row reads 'Torso angle (rear third
+    row)' and is only updated when that angle is a number. When strict is
+    True, a missing second-row angle raises a ValueError (mandatory for score
+    computation). When strict is False, it only logs a warning and returns
+    None, leaving the sheet unchanged (e.g. during preprocessing of a not
+    fully filled template).
     """
     rear_whiplash_df = dfs.get("CP - Rear Whiplash")
     if rear_whiplash_df is None:
         return None
     param_df = common.get_param_df(dfs)
-    torso_angle_row = param_df[
-        (param_df["Input parameter"] == "Torso angle (rear)")
-        & (param_df["param_code"].str.contains("CP - Rear Whiplash", na=False))
-    ]
-    if torso_angle_row.empty:
-        message = "Missing mandatory parameter: 'Torso angle (rear)' in input parameters for CP - Rear Whiplash."
+    second_row_angle = _as_angle(
+        _rear_whiplash_param(param_df, _SECOND_ROW_TORSO_ANGLE_NAMES)
+    )
+    if second_row_angle is None:
+        message = (
+            "Missing mandatory parameter: 'Torso angle (rear second row)' in "
+            "input parameters for CP - Rear Whiplash."
+        )
         if strict:
             raise ValueError(message)
         logger.warning(f"{message} Skipping HPL/LPL update for CP - Rear Whiplash.")
         return None
-    torso_angle_value = float(torso_angle_row.iloc[0]["Value"])
-    hpl_lpl = _backset_hpl_lpl(torso_angle_value)
+    third_row_angle = _as_angle(
+        _rear_whiplash_param(param_df, (TORSO_ANGLE_THIRD_ROW,))
+    )
     df = rear_whiplash_df.copy()
-    mask = df["Criteria"].isin(["Backset - Lowest", "Backset - Mid"])
-    df.loc[mask, "HPL"] = hpl_lpl
-    df.loc[mask, "LPL"] = hpl_lpl
+    seat = (
+        df["Seat position"]
+        .map(lambda v: pd.NA if common.is_empty_cell(v) else v)
+        .ffill()
+    )
+    backset = df["Criteria"].isin(_BACKSET_CRITERIA)
+    limits = [(seat.isin(_SECOND_ROW_SEAT_NAMES), second_row_angle)]
+    if third_row_angle is not None:
+        limits.append((seat == REAR_SEAT_THIRD_ROW, third_row_angle))
+    for seat_mask, angle in limits:
+        mask = backset & seat_mask
+        df.loc[mask, "HPL"] = _backset_hpl_lpl(angle)
+        df.loc[mask, "LPL"] = _backset_hpl_lpl(angle)
     return df
+
+
+# Static-Rear carries 1 point split 75 % seat geometry / 25 % non-use
+# position per seat row (Rear Impact protocol §3.1.3.4 / §3.1.4). The second
+# row takes the whole point when the vehicle has no third row; with one, the
+# two rows take 0.5 each (the packaged template's Max score).
+_STATIC_REAR_GEOMETRY_SHARE = 0.75
+_STATIC_REAR_NON_USE_SHARE = 0.25
+
+
+def _static_rear_max_score(load_case_name, seat_name, sheet_max_score, has_third_row):
+    """Max score of a 'CP - Body region scores' / 'CP - Dummy Scores' row,
+    with the Static-Rear seat rows rescaled by third-row presence: without a
+    third row the second row carries the full point and the third row's
+    rows go to 0, so they can neither score nor inflate the maximum. Both
+    loops go through here so the two sheets always agree."""
+    if load_case_name != "Static-Rear" or has_third_row:
+        return sheet_max_score
+    if seat_name in _SECOND_ROW_SEAT_NAMES:
+        return 1.0
+    if seat_name == REAR_SEAT_THIRD_ROW:
+        return 0.0
+    return sheet_max_score
+
+
+def compute_static_rear_geometry_score(body_region):
+    """Static-Rear seat geometry on the 0-100 scale, built up as the Rear
+    Impact protocol's points ladder (§3.1.3 / §3.1.4) instead of the min over
+    the criteria: both effective heights met -> 50 (0.375 of the row's 0.75
+    geometry share), then the mid backset -> +100/3 (0.25), then the
+    worst-case (lowest and most rearward) backset -> +50/3 (0.125). Each step
+    counts only when the one before it is met. A criterion passes when it is
+    not red (score above 0), so an effective height of exactly 720 / 770 mm
+    passes; a missing score does not pass. Stays None only when the body
+    region has no criteria at all (a blank criterion scores 0)."""
+    scores = {criteria.name: criteria.score for criteria in body_region._criteria}
+    if all(score is None for score in scores.values()):
+        body_region.bodyregion_score = None
+        return None
+
+    def passed(name):
+        score = scores.get(name)
+        return score is not None and score > 0
+
+    geometry = 0.0
+    if passed("Effective height - Lowest") and passed("Effective height - Highest"):
+        geometry = 50.0
+        if passed("Backset - Mid"):
+            geometry += 100 / 3
+            if passed("Backset - Lowest"):
+                geometry += 50 / 3
+    body_region.bodyregion_score = round_half_up(geometry, 5)
+    return body_region.bodyregion_score
+
+
+def compute_static_rear_score(body_region, non_use_position):
+    """Static-Rear Neck score: geometry (the points ladder of
+    compute_static_rear_geometry_score, already in
+    body_region.bodyregion_score, minus inspection) takes 75 % of the row's
+    max score; a non-use position PASS adds the remaining 25 %. Geometry
+    scoring 0 (effective height not met) gates the non-use credit
+    (§3.1.3.4): the whole row is 0. A blank or FAIL non-use earns nothing, so
+    the row tops out at 75 %."""
+    geometry = body_region.get_bodyregion_score()
+    max_score = body_region.get_max_score()
+    inspection = body_region.inspection
+    if geometry is None or max_score is None or inspection is None:
+        body_region.score = None
+        return None
+    geometry_after_inspection = max(geometry - inspection, 0)
+    score = geometry_after_inspection / 100 * _STATIC_REAR_GEOMETRY_SHARE * max_score
+    if non_use_position is True and geometry > 0:
+        score += _STATIC_REAR_NON_USE_SHARE * max_score
+    body_region.score = round_half_up(score, 5)
+    return body_region.score
 
 
 def apply_farside_capping_rule(farside_load_cases, farside_loadcase_color_dict=None):
@@ -273,10 +414,15 @@ def apply_farside_capping_rule(farside_load_cases, farside_loadcase_color_dict=N
 
 
 def _normalize_seat_name(seat_name: str) -> str:
-    return " ".join(
-        word.capitalize() if word.lower() != "and" else "and"
-        for word in seat_name.split()
-    )
+    # Only fully alphabetic words are capitalised: "Rear (second row)" must
+    # stay as spelled on the criteria sheet, or the seat silently never
+    # matches and scores nothing.
+    def normalize(word):
+        if word.lower() == "and":
+            return "and"
+        return word.capitalize() if word.isalpha() else word
+
+    return " ".join(normalize(word) for word in seat_name.split())
 
 
 def _all_dummy_criteria_below_lpl(dummy: Dummy) -> bool:
@@ -366,6 +512,7 @@ def load_data(dfs):
         if rear_whiplash_df is not None:
             dfs = dict(dfs)
             dfs["CP - Rear Whiplash"] = rear_whiplash_df
+    has_third_row = third_row_present(dfs)
 
     sheet_dict = {}
     valid_sheet_names = list(SHEET_MAPPING.keys())
@@ -416,10 +563,14 @@ def load_data(dfs):
                 countermeasure_param = None
 
             # Extract "Red line >125 mm outboard of the orange line" parameter
+            # Both the current spelling (with the trailing " ?") and the
+            # previous template revision's are accepted.
             match_redline = param_df[
-                (
-                    param_df["Input parameter"]
-                    == "Red line >125 mm outboard of the orange line"
+                param_df["Input parameter"].isin(
+                    [
+                        "Red line >125 mm outboard of the orange line ?",
+                        "Red line >125 mm outboard of the orange line",
+                    ]
                 )
                 & (param_df["param_code"].str.contains(sheet_name, na=False))
             ]
@@ -526,44 +677,6 @@ def load_data(dfs):
                         lower_leg_br = BodyRegion(name="Lower Leg, Foot & Ankle")
                         dummy.body_region_list.append(lower_leg_br)
 
-    # Special handling for "CP - Rear Whiplash": keep only the dummy (Driver or Front Passenger) with the lowest score, rename to "Front"
-    if "CP - Rear Whiplash" in sheet_dict:
-        whiplash_loadcases = sheet_dict["CP - Rear Whiplash"]
-        for load_case in whiplash_loadcases:
-            if load_case.name == "Static-Front":
-                # Get both dummies and their scores
-                load_case.raw_seats = load_case.seats.copy()
-                seat1, seat2 = load_case.seats
-                dummy1, dummy2 = seat1.dummy, seat2.dummy
-                # Instead of computing bodyregion score, sum all criteria scores in that body region
-                neck1 = dummy1.get_body_region("Neck")
-                neck2 = dummy2.get_body_region("Neck")
-                if neck1 is not None:
-                    score1 = min(100.0, sum(c.get_score() for c in neck1._criteria))
-                else:
-                    score1 = float("inf")
-                if neck2 is not None:
-                    score2 = min(100.0, sum(c.get_score() for c in neck2._criteria))
-                else:
-                    score2 = float("inf")
-
-                logger.debug(f"Load case name: {load_case.name}")
-                logger.debug(f"1) S: {seat1} D: {dummy1} - score: {score1}")
-                logger.debug(f"2) S: {seat2} D: {dummy2} - score: {score2}")
-
-                # Keep the seat/dummy with the lowest score
-                if score1 <= score2:
-                    # Create a new Seat with name "Front" and the selected dummy
-                    new_seat = Seat(name="Front", dummy=dummy1)
-                    load_case.seats = [new_seat]
-                    new_seat.dummy.get_body_region("Neck").set_bodyregion_score(score1)
-                else:
-                    # Create a new Seat with name "Front" and the selected dummy
-                    new_seat = Seat(name="Front", dummy=dummy2)
-                    load_case.seats = [new_seat]
-                    new_seat.dummy.get_body_region("Neck").set_bodyregion_score(score2)
-                break
-
     # Special handling for "CP - Side Farside" Pole-32: merge Driver and Front Passenger into "Driver and Front Passenger" with a single dummy, and set the Head body region score to 100 if all criteria values are below LPL, otherwise 0
     if "CP - Side Farside" in sheet_dict:
         farside_loadcases = sheet_dict["CP - Side Farside"]
@@ -669,6 +782,9 @@ def load_data(dfs):
             max_score = None
         else:
             max_score = float(round_half_up(max_score, 5))
+        max_score = _static_rear_max_score(
+            current_load_case_name, current_seat_name, max_score, has_third_row
+        )
         inspection = row["Inspection [%]"]
         if pd.isna(inspection):
             inspection = None
@@ -724,6 +840,21 @@ def load_data(dfs):
                                         body_region.compute_score()
 
                                         computed_score = body_region.get_score()
+                                    elif (
+                                        sheet_name == "CP - Rear Whiplash"
+                                        and current_load_case_name == "Static-Rear"
+                                        and dummy.name == "HPM"
+                                        and body_region.name == "Neck"
+                                    ):
+                                        body_region.set_max_score(max_score)
+                                        body_region.set_inspection(inspection)
+                                        compute_static_rear_geometry_score(body_region)
+                                        bodyregion_score = (
+                                            body_region.get_bodyregion_score()
+                                        )
+                                        computed_score = compute_static_rear_score(
+                                            body_region, dummy.non_use_position
+                                        )
                                     elif sheet_name == "CP - Side Farside":
                                         if (
                                             current_load_case_name == "Pole-32"
@@ -979,11 +1110,13 @@ def load_data(dfs):
                     dummy = seat.dummy
                     neck = dummy.get_body_region("Neck")
                     if neck is not None and neck._criteria:
-                        # Compute average of all criteria scores
+                        # Compute average of the scoring criteria (NIC, Fx, Fz);
+                        # capping-only rows carry no points, even when blank
                         scores = [
                             c.get_score()
                             for c in neck._criteria
                             if c.get_score() is not None
+                            and c.criteria_type != CriteriaType.CAPPING_CRITERIA
                         ]
                         logger.debug(
                             f"[CP - Rear Whiplash] Neck body region criteria scores to be avg: {scores}"
@@ -1102,6 +1235,9 @@ def load_data(dfs):
             max_score = None
         else:
             max_score = float(round_half_up(max_score, 5))
+        max_score = _static_rear_max_score(
+            current_load_case_name, current_seat_name, max_score, has_third_row
+        )
         logger.debug("current_load_case_name: %s", current_load_case_name)
         logger.debug("current_seat_name: %s", current_seat_name)
         logger.debug("current_dummy_name: %s", current_dummy_name)

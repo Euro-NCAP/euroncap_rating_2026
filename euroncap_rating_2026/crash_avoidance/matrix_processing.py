@@ -205,16 +205,41 @@ class PredictionResult(str, Enum):
     IN_TOLERANCE = "In Tolerance"
 
 
-def get_band_color(thresholds, value):
+def get_band_color(thresholds, value, half_open=False, degenerate_first=False):
     """
     The colour band `value` falls in, with no tolerance applied -- the "true
     colour of the test point" of FC v1.2 sec 4.2.4, obtained "by comparing the
     actual measured impact speed with the colour bands in section 5.2".
 
     thresholds: list of (PredictionColor, upper_bound), sorted ascending.
-    Intervals: (-inf, t0], (t0, t1], ..., (tn-1, tn], tn==inf.
+
+    Default intervals: (-inf, t0], (t0, t1], ..., (tn-1, tn], tn==inf -- the
+    boundary belongs to the band below.
+
+    half_open: the boundary belongs to the band *above*, [t(i-1), t(i)), the
+    convention of the Crash Protection criteria. Used for the FCW TTC bands
+    (sec 5.2: Green >= 1.7 s, Red < 1.7 s) and for the v_rel_impact bands.
+
+    degenerate_first: with half_open, the first band is the single point
+    v <= t0 and is matched before the half-open walk starts. This keeps Green
+    (v_rel_impact = 0, a fully avoided run) from collapsing to the empty set
+    and makes every later band strictly > 0.
     """
     thresholds = sorted(thresholds, key=lambda x: x[1])
+    if half_open:
+        rest = thresholds
+        lower = float("-inf")
+        if degenerate_first:
+            first_color, first_upper = thresholds[0]
+            if value <= first_upper:
+                return first_color
+            lower = first_upper
+            rest = thresholds[1:]
+        for color, upper in rest:
+            if lower <= value < upper:
+                return color
+            lower = upper
+        return thresholds[-1][0]
     lower = float("-inf")
     for color, upper in thresholds:
         if lower < value <= upper:
@@ -224,7 +249,14 @@ def get_band_color(thresholds, value):
     return thresholds[-1][0]
 
 
-def check_thresholds(thresholds, oem_predicted_color, value, tolerance):
+def check_thresholds(
+    thresholds,
+    oem_predicted_color,
+    value,
+    tolerance,
+    half_open=False,
+    degenerate_first=False,
+):
     """
     Verify one measured value against the OEM's predicted colour band.
 
@@ -236,8 +268,27 @@ def check_thresholds(thresholds, oem_predicted_color, value, tolerance):
     the measured outcome rather than the applied one (an absolute performance
     criterion, say) must read the band colour: get_band_color, or
     ComputedTestPoint.measured_color.
+
+    `half_open` / `degenerate_first` select the band convention, see
+    get_band_color. The tolerance window follows the same convention as the
+    bands: with band edges b0 .. bn and tolerance t the accepted ranges are
+
+        first band (Green)   v < b0 + t
+        middle band i        b(i-1) - t <= v < b(i) + t
+        top band (Red)       v >= b(n-1)        (not widened downward)
+
+    with the lower edge of a middle band clamped at 0 and strict -- an impact
+    speed is never negative, and a fully avoided run stays Green whatever was
+    predicted. For the 60 km/h CMRs table (edges 0 / 10 / 20 / 30, t = 2):
+
+        Colour   Band              Accepted range
+        Green    v = 0             v < 2
+        Yellow   0 < v < 10        0 < v < 12
+        Orange   10 <= v < 20      8 <= v < 22
+        Brown    20 <= v < 30      18 <= v < 32
+        Red      30 <= v           30 <= v
     """
-    interval_color = get_band_color(thresholds, value)
+    interval_color = get_band_color(thresholds, value, half_open, degenerate_first)
     thresholds = sorted(thresholds, key=lambda x: x[1])
 
     # Compare with OEM predicted color
@@ -245,32 +296,48 @@ def check_thresholds(thresholds, oem_predicted_color, value, tolerance):
         return PredictionResult.CORRECT, interval_color
 
     # Not the predicted colour: the point still counts as predicted when it
-    # falls inside the predicted band widened by the tolerance.
-    # Find the interval for OEM color
+    # falls inside the predicted band widened by the tolerance. sec 4.2.4
+    # applies it "when a tested point scores better than predicted" as well
+    # as when it scores worse, and in both cases "the predicted result is
+    # applied".
     oem_idx = next(
         (i for i, (c, _) in enumerate(thresholds) if c == oem_predicted_color), None
     )
-    if oem_idx is not None:
-        # Widen the predicted band outward by the tolerance, in both
-        # directions: FC v1.2 sec 4.2.4 applies it "when a tested point scores
-        # better than predicted" as well as when it scores worse, and in both
-        # cases "the predicted result is applied".
+    if oem_idx is not None and not half_open:
+        # (lower, upper] bands: the widened window keeps the same convention.
+        # Within this package every criteria on these bands carries tolerance
+        # 0.0, so the window collapses onto the band (already CORRECT above);
+        # the widening is kept for callers passing their own tolerance.
         upper_bound = thresholds[oem_idx][1]
         if oem_idx == 0:
-            # Lowest band (Green, v = 0): sec 4.2.4's worked table prints its
-            # accepted range as the strict "v < 2", unlike the half-open rows
-            # below it.
             if value < upper_bound + tolerance:
                 return PredictionResult.IN_TOLERANCE, oem_predicted_color
         else:
-            # An impact speed is never negative, so the widened lower edge
-            # stops at 0 -- which is why the same table accepts
-            # "0 < v <= 12" for Yellow rather than "-2 < v <= 12". Criteria
-            # whose KPI can go negative (dtle_t_end, in metres) carry
-            # tolerance 0.0, so the clamp never reaches them.
             lower_bound = max(thresholds[oem_idx - 1][1] - tolerance, 0.0)
             if lower_bound < value <= upper_bound + tolerance:
                 return PredictionResult.IN_TOLERANCE, oem_predicted_color
+    elif oem_idx is not None:
+        upper_bound = thresholds[oem_idx][1]
+        is_top_band = oem_idx == len(thresholds) - 1
+        upper_ok = value < upper_bound + tolerance
+
+        if oem_idx == 0:
+            # Lowest band (Green, v = 0): accepted as the strict "v < b0 + t".
+            lower_ok = True
+        else:
+            raw_lower = thresholds[oem_idx - 1][1]
+            # The top band (Red) is not widened downward.
+            lower_bound = raw_lower if is_top_band else raw_lower - tolerance
+            if lower_bound <= 0.0:
+                # An impact speed is never negative, so the widened lower
+                # edge stops at 0 and stays strict: a fully avoided run keeps
+                # its own (better) Green colour.
+                lower_ok = value > 0.0
+            else:
+                lower_ok = value >= lower_bound
+
+        if lower_ok and upper_ok:
+            return PredictionResult.IN_TOLERANCE, oem_predicted_color
 
     return PredictionResult.INCORRECT, interval_color
 
@@ -376,12 +443,23 @@ class ComputedTestPoint:
         CPLA/CBLA point is re-classified into WARNING (declared FCW) or
         AVOIDANCE (FCW declared as AEB) before reaching here.
         """
-        self.measured_color = get_band_color(thresholds, self.value)
+        # Band convention, per criteria (see get_band_color): the FCW TTC and
+        # v_rel_impact bands give the boundary to the band above; the
+        # v_rel_impact tables also keep Green as the single point v = 0.
+        degenerate_first = (
+            criteria == data_model.NcapTestCriteria.MITIGATION_OR_AVOIDANCE
+        )
+        half_open = degenerate_first or criteria == data_model.NcapTestCriteria.WARNING
+        self.measured_color = get_band_color(
+            thresholds, self.value, half_open, degenerate_first
+        )
         prediction_result, applied_color = check_thresholds(
             thresholds,
             self.test_point.color,
             self.value,
             _tolerance_for(criteria),
+            half_open,
+            degenerate_first,
         )
         self.prediction_result = prediction_result
         return applied_color
@@ -573,7 +651,14 @@ class ComputedTestPoint:
             )
             return common.PredictionColor.GREY
 
-    def get_lsc_computed_color(self, vehicle_response):
+    def get_lsc_computed_color(self, type_of_system=None, door_selected=None):
+        """Colour of an LSC point from its measured value.
+
+        *type_of_system* and *door_selected* are only read for CBDA (LSC
+        dooring): the dooring function recorded in the row's "Type of system"
+        (data_model.VehicleResponse) and the door the row was tested on. The
+        avoidance and mitigation scenarios ignore both.
+        """
         lsc_avoidance_scenarios = [
             "CCCscp SfS",
             "CMCscp SfS",
@@ -611,47 +696,102 @@ class ComputedTestPoint:
                 return common.PredictionColor.RED
 
         elif is_dooring:
-            # LSC dooring thresholds logic
-            # Vehicle response | Criteria | Doors | Colour Band
-            # Information: TTC ≥ 2.30s, Driver's only -> Brown; TTC < 2.30s -> Red
-            # Warning: TTC ≥ 1.70s, Driver's only -> Orange; All -> Yellow; TTC < 1.70s, Driver's only or All -> Red
-            # Retention: Start @ TTC ≥ 1.70s AND End @ TTC ≤ -0.40s, Driver's only -> Yellow; All -> Green
-            # Start @ TTC < 1.70s OR End @ TTC > -0.40s, Driver's only or All -> Red
+            return self._get_dooring_color(type_of_system, door_selected)
 
-            ttc = self.value  # TTC value
-            logger.debug(
-                f"LSC Door scenario: value={ttc}, vehicle_response={vehicle_response}, predicted_color={self.test_point.color}"
+    def _get_dooring_color(self, type_of_system, door_selected):
+        """CBDA colour, per row:
+
+            pass_band = Information: ttc >= 2.30
+                        Warning:     ttc >= 1.70
+                        Retention:   not (-0.40 < ttc < 1.70)
+                        (NaN / missing TTC always fails, for every type)
+
+        The NaN guard covers a value that reaches this method. It is not the
+        unfilled-sheet case: compute_lsc_loadcase_score short-circuits a blank
+        "Value" cell to the OEM prediction weight before getting here, for
+        CBDA as for every other LSC scenario.
+            ceiling   = Retention   + door != Driver -> GREEN
+                        Retention   + door == Driver -> YELLOW
+                        Warning     + door != Driver -> YELLOW
+                        Warning     + door == Driver -> ORANGE
+                        Information + any door       -> BROWN
+            computed  = worst_of(ceiling, oem_prediction) if pass_band else RED
+
+        Green (retention) and Yellow (warning) mean the system covers all
+        doors; Yellow (retention) and Orange (warning) the driver's door only.
+        The ceiling reads the door that was actually tested instead of trusting
+        the predicted colour; the OEM prediction stays as a cap so a row never
+        scores better than predicted.
+        """
+        ttc = self.value
+        oem_color = self.test_point.color
+        door_missing = (
+            door_selected is None
+            or (isinstance(door_selected, float) and pd.isna(door_selected))
+            or str(door_selected).strip() == ""
+        )
+        if door_missing:
+            logger.warning(
+                f"CBDA point {self.test_point.row},{self.test_point.col}: no "
+                f"'Door selected'; scoring it as the driver's door."
             )
-            logger.debug(
-                f"vehicle_response==VehicleResponse.INFORMATION: {vehicle_response==data_model.VehicleResponse.INFORMATION}"
+        # Only a recognised non-driver door lifts the ceiling to the all-door
+        # band. Everything else -- missing, or a value that is not one of the
+        # four the tool assigns -- takes the driver's-door ceiling, so a typo
+        # can never buy a better colour than the row earned.
+        is_driver_door = (
+            door_missing
+            or str(door_selected).strip().lower()
+            not in data_model.NON_DRIVER_DOORS_NORMALIZED
+        )
+        logger.debug(
+            f"LSC Door scenario: value={ttc}, type_of_system={type_of_system}, "
+            f"door_selected={door_selected}, predicted_color={oem_color}"
+        )
+
+        if ttc is None or pd.isna(ttc):
+            passes = False
+        elif type_of_system == data_model.VehicleResponse.INFORMATION:
+            passes = ttc >= 2.30
+        elif type_of_system == data_model.VehicleResponse.WARNING:
+            passes = ttc >= 1.70
+        elif type_of_system == data_model.VehicleResponse.RETENTION:
+            passes = not (-0.40 < ttc < 1.70)
+        else:
+            logger.warning(
+                f"CBDA point {self.test_point.row},{self.test_point.col}: unknown "
+                f"type of system {type_of_system!r}; scoring RED."
             )
-            if vehicle_response == data_model.VehicleResponse.INFORMATION:
-                if ttc >= 2.30:
-                    logger.debug(f"Returning BROWN color.")
-                    return common.PredictionColor.BROWN
-                else:
-                    logger.debug(f"Returning RED color.")
-                    return common.PredictionColor.RED
-            elif vehicle_response == data_model.VehicleResponse.WARNING:
-                if ttc >= 1.70:
-                    if self.test_point.color == common.PredictionColor.ORANGE:
-                        return common.PredictionColor.ORANGE
-                    else:
-                        return common.PredictionColor.YELLOW
-                else:
-                    return common.PredictionColor.RED
-            elif vehicle_response == data_model.VehicleResponse.RETENTION:
-                if pd.isna(ttc):
-                    return common.PredictionColor.RED
-                # FAIL if -0.4 < value < 1.7, PASS otherwise
-                passes = not (-0.40 < ttc < 1.70)
-                if passes and self.test_point.color in (
-                    common.PredictionColor.GREEN,
-                    common.PredictionColor.YELLOW,
-                ):
-                    return self.test_point.color
-                else:
-                    return common.PredictionColor.RED
+            return common.PredictionColor.RED
+
+        if not passes:
+            logger.debug("Returning RED color.")
+            return common.PredictionColor.RED
+
+        if type_of_system == data_model.VehicleResponse.INFORMATION:
+            ceiling = common.PredictionColor.BROWN
+        elif type_of_system == data_model.VehicleResponse.WARNING:
+            ceiling = (
+                common.PredictionColor.ORANGE
+                if is_driver_door
+                else common.PredictionColor.YELLOW
+            )
+        else:
+            ceiling = (
+                common.PredictionColor.YELLOW
+                if is_driver_door
+                else common.PredictionColor.GREEN
+            )
+
+        rank = data_model.LSC_COLOR_RANK
+        if oem_color in rank and rank[oem_color] < rank[ceiling]:
+            computed = oem_color
+        else:
+            computed = ceiling
+        logger.debug(
+            f"Returning {computed} color (ceiling={ceiling}, prediction={oem_color})."
+        )
+        return computed
 
 
 CBLA_STANDARD_IMPACT_LOCATION_BY_TARGET_SPEED = {

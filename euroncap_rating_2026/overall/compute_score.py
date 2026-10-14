@@ -657,6 +657,7 @@ def calculate_score(dfs: dict) -> dict:
 def compute_score(input_file, reports_path, output_path):
     """Collect NCAP scores from the report directory and compute the overall score."""
     common.check_version(input_file, common.CliCommand.GENERATE_TEMPLATE)
+    common.check_protocol(input_file)
     print(f"[Overall] Collecting NCAP scores from report directory {reports_path}...")
 
     if not input_file:
@@ -685,6 +686,12 @@ def compute_score(input_file, reports_path, output_path):
     }
     for prefix, sheets in domain_sheets.items():
         path = get_report_path_with_prefix(reports_path, prefix)
+        if path is not None:
+            # A roll-up must not silently mix one programme's domain report
+            # into the other's star rating.
+            common.check_protocol(
+                path, description=f"{PREFIX_TO_DOMAIN.get(prefix, prefix)} report"
+            )
         dfs[prefix] = {s: get_sheet_from_report(path, s) for s in sheets}
 
     updated_dfs = calculate_score(dfs)

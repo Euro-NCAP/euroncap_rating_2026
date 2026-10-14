@@ -179,99 +179,82 @@ ROBUSTNESS_LAYER_TO_VERIFICATION_CONDITION = {
         ],
         "CC ELK On": [
             ("0.25m away from VUT", AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED),
-            ("0.5m closer to VUT", AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED),
+            ("0.25m closer to VUT", AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED),
         ],
         "CC ELK Ov": [
             ("0.25m away from VUT", AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED),
-            ("0.5m closer to VUT", AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED),
+            ("0.25m closer to VUT", AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED),
         ],
-        "CM ELK On": (
-            "safety_margin_violation",
-            AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED,
-        ),
-        "CM ELK Ov": (
-            "safety_margin_violation",
-            AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED,
-        ),
+        "CM ELK On": [
+            ("0.25m away from VUT", AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED),
+            ("0.25m closer to VUT", AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED),
+        ],
+        "CM ELK Ov": [
+            ("0.25m away from VUT", AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED),
+            ("0.25m closer to VUT", AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED),
+        ],
     },
+    # FC v1.2 sec 5.2.1.3, Target robustness layers table.
     RobustnessLayer.TRAJECTORY_HEADING: {
         "CCRs": [
             (
-                "+20° (rotation around the impact point)",
+                "-10° (rotation around the impact point)",
                 AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED,
             ),
             (
-                "-20° (rotation around the impact point)",
+                "+20° (rotation around the impact point)",
                 AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED,
             ),
         ],
         "CMRs": [
             (
-                "+20° (rotation around the impact point)",
+                "-10° (rotation around the impact point)",
                 AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED,
             ),
             (
-                "-20° (rotation around the impact point)",
+                "+20° (rotation around the impact point)",
                 AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED,
             ),
         ],
         "CPNA": [
             (
-                "+20° (rotation around the impact point)",
+                "-10° (rotation around the impact point)",
                 AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED,
             ),
             (
-                "-20° (rotation around the impact point)",
+                "+20° (rotation around the impact point)",
                 AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED,
             ),
         ],
         "CPFA": [
             (
-                "+20° (rotation around the impact point)",
+                "-10° (rotation around the impact point)",
                 AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED,
             ),
-            (
-                "-20° (rotation around the impact point)",
-                AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED,
-            ),
-        ],
-        "CBNA": [
             (
                 "+20° (rotation around the impact point)",
                 AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED,
             ),
-            (
-                "-20° (rotation around the impact point)",
-                AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED,
-            ),
         ],
-        "CBFA": [
-            (
-                "+20° (rotation around the impact point)",
-                AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED,
-            ),
-            (
-                "-20° (rotation around the impact point)",
-                AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED,
-            ),
-        ],
-        "CPNCO": [
-            (
-                "+20° (rotation around the impact point)",
-                AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED,
-            ),
-            (
-                "-20° (rotation around the impact point)",
-                AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED,
-            ),
-        ],
+        "CBNA": (
+            "+20° (rotation around the impact point)",
+            AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED,
+        ),
+        "CBFA": (
+            "-20° (rotation around the impact point)",
+            AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED,
+        ),
+        "CPNCO": (
+            "+20° (rotation around the impact point)",
+            AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED,
+        ),
         "CBNAO": [
             (
-                "+20° (rotation around the impact point)",
+                "-10° (rotation around the impact point)",
                 AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED,
             ),
             (
-                "-20° (rotation around the impact point)",
+                "+20° (rotation around the impact point)",
                 AssessmentCriteria.SAME_OR_BETTER_THAN_PREDICTED,
             ),
         ],

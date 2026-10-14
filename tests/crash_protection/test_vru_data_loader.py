@@ -404,9 +404,10 @@ class TestAddVruSheetsToDfsDataFramePath(unittest.TestCase):
        common.frequency_proportional_sample as None and die with a
        TypeError; it now warns and samples 0 verification points.
     2. The blue-point selection fix (vru_processing.select_blue_pattern /
-       _resolve_row_coin): an all-blue legform row keeps its full declared
-       span -- the coin only decides which *orphaned* SA cells get promoted
-       to ST, it never drops or relabels a declared T/ST cell.
+       _draw_row_parity): an all-blue legform row keeps its full declared
+       span -- the L0/L1 (U0/U1) start-point draw only decides which SA
+       cells get promoted to ST, it never drops or relabels a declared T/ST
+       cell.
 
     Every case round-trips dfs through parquet and back first, mirroring how
     such callers actually feed add_vru_sheets_to_dfs from parquet storage
@@ -528,8 +529,10 @@ class TestAddVruSheetsToDfsDataFramePath(unittest.TestCase):
         return dfs
 
     def _leg_alternating_pattern(self):
-        # Row 0 all ST; rows 1-2 alternating ST/SA -- every SA has a tested
-        # neighbor, so no orphan, no coin: must be emitted exactly as declared.
+        # Row 0 all ST; rows 1-2 alternating ST/SA with SA on the odd signed
+        # columns (centre index 10 is even). An L0/U0 draw (coin=0) promotes
+        # nothing, so the plan is emitted exactly as declared; an L1/U1 draw
+        # (coin=1) promotes every SA.
         pattern = {}
         for j in range(self.LEG_WIDTH):
             pattern[(0, j)] = "st"
@@ -572,7 +575,8 @@ class TestAddVruSheetsToDfsDataFramePath(unittest.TestCase):
     ):
         dfs = self._filled_dfs(self._leg_alternating_pattern())
 
-        head_points, leg_points, _ = self._run(dfs)
+        with patch("random.randint", return_value=0):
+            head_points, leg_points, _ = self._run(dfs)
 
         head_counts = self._color_counts(head_points)
         sampled = sum(
@@ -610,7 +614,8 @@ class TestAddVruSheetsToDfsDataFramePath(unittest.TestCase):
             leg=self.NUM_TESTS_LEG,
         )
 
-        head_points, leg_points, _ = self._run(dfs)
+        with patch("random.randint", return_value=0):
+            head_points, leg_points, _ = self._run(dfs)
 
         head_counts = self._color_counts(head_points)
         sampled = sum(
@@ -633,6 +638,26 @@ class TestAddVruSheetsToDfsDataFramePath(unittest.TestCase):
         self.assertEqual(leg_counts.get("st", 0), self.LEG_WIDTH + 2 * st_per_alt_row)
         self.assertEqual(leg_counts.get("sa", 0), 2 * sa_per_alt_row)
         self.assertEqual(leg_counts.get("t", 0), 0)
+
+    def test_alternating_leg_rows_l1_draw_promotes_every_sa(self):
+        # Same plan as above, but the draw lands on L1/U1 (odd signed columns),
+        # where every declared SA sits: all of them are promoted to ST and the
+        # cell count is unchanged.
+        dfs = self._filled_dfs(self._leg_alternating_pattern())
+        self._set_num_verification_tests(
+            dfs,
+            head=self.NUM_TESTS_HEAD,
+            pelvis=self.NUM_TESTS_PELVIS,
+            leg=self.NUM_TESTS_LEG,
+        )
+
+        with patch("random.randint", return_value=1):
+            _, leg_points, _ = self._run(dfs)
+
+        leg_counts = self._color_counts(leg_points)
+        self.assertEqual(len(leg_points), 3 * self.LEG_WIDTH)
+        self.assertEqual(leg_counts.get("st", 0), 3 * self.LEG_WIDTH)
+        self.assertEqual(leg_counts.get("sa", 0), 0)
 
     def test_stratified_sampling_covers_every_band_with_eligible_cells(self):
         """A single colour-proportional draw over the whole grid
@@ -697,7 +722,7 @@ class TestAddVruSheetsToDfsDataFramePath(unittest.TestCase):
         apillar_predictions = {self._color_of(p) for p in apillar_points}
         self.assertEqual(apillar_predictions, {"green-40", "green-30", "green-20"})
 
-    def test_all_sa_legform_rows_coin_flip_only_promotes_never_drops(self):
+    def test_all_sa_legform_rows_draw_only_promotes_never_drops(self):
         all_sa = {(i, j): "sa" for i in range(3) for j in range(self.LEG_WIDTH)}
         dfs = self._filled_dfs(all_sa)
         self._set_num_verification_tests(
